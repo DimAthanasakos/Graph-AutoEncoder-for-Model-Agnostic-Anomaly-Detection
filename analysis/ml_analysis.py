@@ -106,18 +106,20 @@ class MLAnalysis(common_base.CommonBase):
             
             batch_size = model_info['model_settings']['batch_size']
             n_total = model_info['n_total']
-            for graph_structure in model_info['model_settings']['graph_types']: 
-                graph_key = f'graphs_pyg_bkg__{graph_structure}'
-                path = os.path.join(self.output_dir, f'{graph_key}.pt')
-                model_info['graph_key'] = graph_key
-                model_info['path'] = path   
-                if not os.path.exists(path):
-                    print(f'Graph file {path} does not exist.')
-                    sys.exit(1) 
-                
-                model = ml_train.gae(model_info).train()
 
-                self.AUC = ml_anomaly(model_info, model).run()
+            for graph_structure in model_info['model_settings']['graph_types']: 
+                regions = ['SB', 'SR']
+                for region in regions:
+                    graph_key = f'graphs_pyg_{region}__{graph_structure}'
+                    path = os.path.join(self.output_dir, f'{graph_key}.pt')
+                    model_info[f'graph_key_{region}'] = graph_key
+                    model_info[f'path_{region}'] = path
+                    print(f'graph_key_{region}: {graph_key}')
+                    print(f'path_{region}: {path}')
+
+                model = ml_train.gae(model_info).train()
+                
+                self.AUC = ml_anomaly.anomaly(model, model_info).run()
 
 
 

@@ -77,6 +77,7 @@ class SteerAnalysis(common_base.CommonBase):
                 graph_key = f'graphs_pyg_SB__{graph_structure}'
                 path = os.path.join(self.output_dir, f'{graph_key}.pt')
                 
+                # this will create both the graphs for pure bkg (SB) and signal+bkg (SR)
                 if self.rank==0 and self.regenerate_graphs or not os.path.exists(path):
                     utils.construct_graphs(output_dir=self.output_dir, graph_structure=graph_structure)
 

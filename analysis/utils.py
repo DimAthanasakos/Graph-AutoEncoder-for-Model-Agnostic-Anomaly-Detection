@@ -87,10 +87,9 @@ def _preprocessing(particles,jets,mjj,save_json=False, norm = 'mean'):
                 'mean_particle': mean_particle.tolist(),
                 'std_particle': std_particle.tolist(),                     
                 }                
-            
         SaveJson('preprocessing_{}.json'.format(n_part),data_dict)
     else:
-        data_dict = LoadJson('preprocessing_{}.json'.format(n_part))
+        data_dict = LoadJson(f'preprocessing_{n_part}.json')
 
             
     if norm == 'mean':
@@ -139,19 +138,16 @@ def SimpleLoader(data_path,file_name,use_SR=False,
         mask = mask[:int(0.9*jets.shape[0])]
         jets = jets[:int(0.9*jets.shape[0])]
     
-    
-    mask = np.expand_dims(particles[:,:,:,-1],-1)
-    return particles[:,:,:,:-1]*mask,jets,mjj
+    return particles,jets,mjj
 
 
 
-def class_loader(n_events,
-                 data_path='/pscratch/sd/d/dimathan/LHCO/Data', 
+def class_loader(data_path='/pscratch/sd/d/dimathan/LHCO/Data', 
                  file_name='processed_data_background_rel.h5' , # the default file name for the background data
                  npart=279,
                  use_SR=True,
                  nsig=15000,
-                 nbkg=60671,
+                 nbkg=120000, # its actually around ~100k in the dataset
                  mjjmin=2300,
                  mjjmax=5000):
     
@@ -299,12 +295,23 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
     # Load data
     if not use_SR:
         particles, jets, mjj = DataLoader(n_events=n_events, rank=rank)
-        labels = [0]*len(particles)
+        labels = [0]*len(particles)       
+        print(f'particles shape: {particles.shape}')
+        print(f'jets shape: {jets.shape}')
+        print(f'mjj shape: {mjj.shape}')
+        print(f'labels shape: {len(labels)}')
+
+
     else:   
-        particles, jets, mjj, labels = class_loader(n_events=1000000, use_SR=True, nsig = 2500)
+        jets, particles, mjj, labels = class_loader(n_events=1000000, use_SR=True, nsig = 2500)
+        print(f'particles shape: {particles.shape}')
+        print(f'jets shape: {jets.shape}')
+        print(f'mjj shape: {mjj.shape}')
+        print(f'labels shape: {len(labels)}')
+
 
     # preprocess the data before constructing the fully connected graphs 
-    particles, jets = _preprocessing(particles, jets, mjj, save_json=True, norm = 'mean')
+    particles, jets = _preprocessing(particles, jets, mjj, norm = 'mean')
 
     if use_SR:
         graph_key = f'SR__{graph_structure}'

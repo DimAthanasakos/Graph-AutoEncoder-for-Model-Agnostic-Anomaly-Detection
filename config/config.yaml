@@ -2,16 +2,18 @@
 
 # Size of labeled data to load (i.e. number of jets). Recommended split: 80/10/10
 # The qvsg dataset has 2M jets, the ZvsQCD dataset currently has 2M jets, but we can download more if needed (although training would be tough). 
-n_train: 5000
-n_val:   500
-n_test:  500
+n_train: 50000
+n_val:   2500
+n_test:  2500
 
 
 models: ['EdgeNet']
 
 EdgeNet: 
   graph_types: ['fully_connected'] 
-  batch_size: 256  
-  epochs: 1
+  batch_size: 512  
+  epochs: 20
   learning_rate: 0.001
   lossname: 'MSE'
+  n_sig: 2500
+  n_bkg: 100000
