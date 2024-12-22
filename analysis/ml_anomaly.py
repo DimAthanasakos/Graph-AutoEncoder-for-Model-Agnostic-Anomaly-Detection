@@ -33,7 +33,7 @@ import random
 
 
 class anomaly():
-    def __init__(self, model, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots4') -> None:
+    def __init__(self, model, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plotstest3') -> None:
         self.model_info = model_info
         self.path = model_info['path_SR'] # path to the data (pyg dataset)
         self.ddp = model_info['ddp']
@@ -63,8 +63,8 @@ class anomaly():
         dataset = torch.load(self.path)
 
         random.Random(0).shuffle(dataset)
-        print(f'Loaded dataset with {len(dataset)} samples')
-
+        print(f'Loaded testing (SR) dataset with {len(dataset)} samples')
+        dataset = dataset[:self.n_bkg + self.n_sig]
         dataset = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
         return dataset
     
@@ -99,8 +99,11 @@ class anomaly():
 
                 # 4) If you want "both jets must exceed threshold" logic as a *score*,
                 #    you can combine them somehow (e.g. take min)
-                scores = torch.min(loss1_per_graph, loss2_per_graph)
+                #scores = torch.min(loss1_per_graph, loss2_per_graph)
 
+                # if we want the total loss as the score 
+                scores = loss1_per_graph + loss2_per_graph
+                
                 # 5) Extend the scores and labels
                 #    Typically, each graph in batch_jets0 has a single label in batch_jets0.y, shape [G].
                 all_scores.extend(scores.cpu().tolist())
@@ -129,20 +132,36 @@ class anomaly():
         plt.close()
 
 
-        # -----------------------------
+        # ------------------------------------------------
         # 2) Plot loss distribution by label (normalized)
-        # -----------------------------
+        # ------------------------------------------------
         normal_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 0]
         anomalous_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 1]
+
+
+        # Compute the 99th percentile for both distributions
+        p99_normal = np.percentile(normal_scores, 99)
+        p99_anomalous = np.percentile(anomalous_scores, 99)
+
+        # Determine the x-axis limit (max of the two 95th percentiles)
+        x_max = max(p99_normal, p99_anomalous)
+
+        # Define the bin edges based on [0, x_max]
+        num_bins = 75  # Number of bins
+        bin_edges = np.linspace(0, x_max, num_bins + 1)  # Create bins in the range [0, x_max]
+
+        #all_scores_combined = normal_scores + anomalous_scores  # Combine all scores
+        #bin_edges = np.histogram_bin_edges(all_scores_combined, bins=100)  # Compute bin edges
 
         dist_plot_file = os.path.join(self.plot_path, "loss_distribution_of_sig_vs_bkg.pdf")
 
         plt.figure(figsize=(6, 5))
         # density=True => each histogram integrates to 1, letting you compare shapes
-        plt.hist(normal_scores, bins=50, label="Normal (label=0)", color="green", histtype='step',)
-        plt.hist(anomalous_scores, bins=50, label="Anomalous (label=1)", color="red", histtype='step',)
+        plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
+        plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
 
         plt.xlabel("Loss Score")
+        plt.xlim(0, x_max)
         plt.ylabel("Density")
         plt.title("Loss Distribution by Label (Normalized)")
         plt.legend(loc="upper right")

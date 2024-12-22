@@ -22,6 +22,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from torch_geometric.data import Data, DataListLoader
 from torch_geometric.loader import DataLoader #.data.DataLoader has been deprecated
+from torch_scatter import scatter_mean
 
 from models.models import EdgeNet, EdgeNetVAE, EdgeNet2, EdgeNetDeeper
 
@@ -31,7 +32,7 @@ import random
 
 
 class gae(): 
-    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots4'):
+    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plotstest3'):
         self.model_info = model_info
         self.path = model_info['path_SB'] # path to the data (pyg dataset)
         self.ddp = model_info['ddp']
@@ -93,6 +94,7 @@ class gae():
         dataset = torch.load(self.path)
 
         random.Random(0).shuffle(dataset)
+        print(f'Loaded training (SB) dataset with {len(dataset)} samples')
         if self.rank==0 and self.n_total > len(dataset):
             print()
             print(f'==========================================')
@@ -103,6 +105,7 @@ class gae():
 
 
         dataset = dataset[:self.n_total]
+        print(f'Using {len(dataset)} samples for training, validation and testing')
 
         train_dataset  = dataset[:self.n_train]
         test_dataset   = dataset[self.n_train:self.n_train + self.n_test]
@@ -130,7 +133,7 @@ class gae():
         model_to_choose = self.model_info['model']
         if model_to_choose == 'EdgeNet':
             model = EdgeNet(input_dim=3, big_dim=32, hidden_dim=2, aggr='mean')
-
+            
         else: sys.exit(f'Error: model {model_to_choose} not recognized.') 
 
         # Print the model architecture if master process
@@ -185,18 +188,18 @@ class gae():
             out0 = self.model(batch_jets0)
             out1 = self.model(batch_jets1)
 
-            loss0 = self.criterion(out0, batch_jets0.x)
-            loss1 = self.criterion(out1, batch_jets1.x)
+            loss0 = self.criterion(out0, batch_jets0.x) * 100 # multiply by 1000 to scale the loss
+            loss1 = self.criterion(out1, batch_jets1.x) * 100
             loss = loss0 + loss1
 
             loss.backward()
             self.optimizer.step()
-            loss_cum += loss.item() 
+            loss_cum += loss.item() * length
             count += length
             # Cache management
             #torch.cuda.empty_cache()
 
-        return loss_cum/count * 1000
+        return loss_cum/count
 
     
     #---------------------------------------------------------------
@@ -214,46 +217,53 @@ class gae():
             out0 = self.model(batch_jets0)
             out1 = self.model(batch_jets1)
 
-            loss0 = self.criterion(out0, batch_jets0.x)
-            loss1 = self.criterion(out1, batch_jets1.x)
+            loss0 = self.criterion(out0, batch_jets0.x) * 100
+            loss1 = self.criterion(out1, batch_jets1.x) * 100
 
             loss = loss0 + loss1
 
-            loss_cum += loss.item() 
+            loss_cum += loss.item() * length
             count += length
             # Cache management
             #torch.cuda.empty_cache()
-        
-        return loss_cum / count * 1000
+            
+        return loss_cum / count
 
     #---------------------------------------------------------------
     @torch.no_grad()
+    # TODO: something is wrong here since the loss is ~20k bigger  than the training loss, copy the code from ml_anomaly.py
     def _plot_loss(self):
         self.model.eval()
         event_losses = []
+        # A nodewise criterion
+        criterion_none = torch.nn.MSELoss(reduction='none') # This 
+        with torch.no_grad():
+            for batch_jets0, batch_jets1 in self.test_loader:
+                batch_jets0 = batch_jets0.to(self.torch_device)
+                batch_jets1 = batch_jets1.to(self.torch_device)             
 
-        for batch_jets0, batch_jets1 in self.test_loader:
-            batch_jets0 = batch_jets0.to(self.torch_device)
-            batch_jets1 = batch_jets1.to(self.torch_device)
+                out1 = self.model(batch_jets0)
+                out2 = self.model(batch_jets1)
 
-            list_jet0 = batch_jets0.to_data_list()
-            list_jet1 = batch_jets1.to_data_list()
+                # 1) Nodewise loss => shape [N, F]
+                loss1_nodewise = criterion_none(out1, batch_jets0.x)
+                loss2_nodewise = criterion_none(out2, batch_jets1.x)
 
-            for jet0, jet1 in zip(list_jet0, list_jet1):
-                out0 = self.model(jet0)
-                out1 = self.model(jet1)
+                # 2) Average across features => shape [N]
+                loss1_per_node = loss1_nodewise.mean(dim=-1)
+                loss2_per_node = loss2_nodewise.mean(dim=-1)
 
-                loss0 = self.criterion(out0, jet0.x)
-                loss1 = self.criterion(out1, jet1.x)
-                event_losses.append([loss0.item()*1000, loss1.item()*1000])
+                # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
+                loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0) * 100
+                loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0) * 100
+
+                # 4) Compute the combined loss for each graph and append to event_losses
+                scores = (loss1_per_graph + loss2_per_graph)  # Shape: [G]
+                event_losses.extend(scores.cpu().tolist())  # Convert to list and extend
 
         plot_file = os.path.join(self.plot_path, 'val_loss_distribution.pdf')
 
-
-        # Separate the two losses
-        loss0_array = [vals[0] for vals in event_losses]
-        loss1_array = [vals[1] for vals in event_losses]
-        loss_tot  = [(vals[0] + vals[1])/2 for vals in event_losses]
+        loss_tot  =  event_losses
 
         # Example: Compute quantiles for loss0_array and loss1_array
         quantiles_loss = {
@@ -263,38 +273,19 @@ class gae():
             "90%": np.quantile(loss_tot, 0.9),  # 90% quantile
         }
         
-        # Check how many events have both graphs' losses > 50% quantile
-        over_50_count = np.sum(
-            (loss0_array > quantiles_loss['50%']) &
-            (loss1_array > quantiles_loss['50%']) )
-        over_50_count = over_50_count/len(loss0_array)
-
-        # Check how many events have both graphs' losses > 70% quantile
-        over_70_count = np.sum(
-            (loss0_array > quantiles_loss['70%']) &
-            (loss1_array > quantiles_loss['70%']) )
-        over_70_count = over_70_count/len(loss0_array)
-
-        # Check how many events have both graphs' losses > 80% quantile
-        over_80_count = np.sum(
-            (loss0_array > quantiles_loss['80%']) &
-            (loss1_array > quantiles_loss['80%']) )
-        over_80_count = over_80_count/len(loss0_array)
-        
+        p99 = np.quantile(loss_tot, 0.99) # 99% quantile
+        num_bins = 75
+        bins = np.linspace(0, p99, num_bins) 
         print(f'--------------------------------')
         #print the average loss
-        print(f"Average loss per jet: {np.mean(loss_tot)*2:.2f} ")
+        print(f"Average loss per event: {np.mean(loss_tot):.4f} ")
         print(f"Quantiles for the loss per jet: {quantiles_loss}")
         print()
-        print(f"Percentage of events with both graphs' losses > 50% quantile: {over_50_count*100:.1f}%")
-        print(f"Percentage of events with both graphs' losses > 70% quantile: {over_70_count*100:.1f}%")
-        print(f"Percentage of events with both graphs' losses > 80% quantile: {over_80_count*100:.1f}%")
-        print(f'--------------------------------')
 
         # Plot each distribution with a different color
         plt.figure(figsize=(8, 6))
-        plt.hist(loss0_array, bins=100, color='blue', histtype='step', label='Loss 0')
-        plt.hist(loss1_array, bins=100, color='red',  histtype='step', label='Loss 1')
+        plt.hist(loss_tot, bins=bins, color='blue', histtype='step', label='Loss of test set (bkg)', density=True )
+        #plt.hist(loss1_array, bins=100, color='red',  histtype='step', label='Loss 1')
         plt.xlabel('Loss')
         plt.ylabel('Counts')
         plt.title('Comparison of Two Loss Distributions')

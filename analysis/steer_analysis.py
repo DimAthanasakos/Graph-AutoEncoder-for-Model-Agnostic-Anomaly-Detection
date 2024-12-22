@@ -72,6 +72,11 @@ class SteerAnalysis(common_base.CommonBase):
         # If you want to use subjets instead of hadrons, we also need an input file to read the subjets from.
         # If so, the input file must be one of the files in the google spreadsheet: https://docs.google.com/spreadsheets/d/1DI_GWwZO8sYDB9FS-rFzitoDk3SjfHfgoKVVGzG1j90/edit#gid=0
         t_start = time.time()
+
+        # DEBUGGIN
+        #utils.DataLoader(n_events=100000)
+        # DEBUGGIN
+
         for model in self.models: 
             for graph_structure in self.config[model]['graph_types']: 
                 graph_key = f'graphs_pyg_SB__{graph_structure}'

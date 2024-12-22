@@ -60,6 +60,21 @@ def _preprocessing(particles,jets,mjj,save_json=False, norm = 'mean'):
     n_part = particles.shape[2]
     batch_size = particles.shape[0]
 
+    return particles.astype(np.float32), jets.astype(np.float32)
+
+    for ps in particles:
+        print(f'ps.shape: {ps.shape}')
+        for p in ps:
+            print(f'p[:20]: {p[:20]}')
+            msk = p[:,0]>0 # mask for non-zero padded particles
+            yphi_avg = np.average(p[msk,1:3], weights=p[msk,0], axis=0)
+            p[msk,1:3] -= yphi_avg       # centralize phi and eta
+            p[msk,0] /= np.sum(p[msk,0]) # normalize pt
+            print(f'p[:20]: {p[:20]}')
+            print()
+        time.sleep(0.5)
+    return particles.astype(np.float32), jets.astype(np.float32)
+
     jets[:,:,0] = jets[:,:,0]/np.expand_dims(mjj,-1)
     jets[:,:,3] = jets[:,:,3]/np.expand_dims(mjj,-1)
         
@@ -111,9 +126,9 @@ def SimpleLoader(data_path,file_name,use_SR=False,
 
 
     with h5.File(os.path.join(data_path,file_name),"r") as h5f:
-        particles = h5f['constituents'][:]
-        jets = h5f['jet_data'][:]
-        mask = h5f['mask'][:]
+        particles = h5f['constituents'][:, :, :npart, :]
+        jets = h5f['jet_data'][:, :, :npart]
+        mask = h5f['mask'][:, :, :npart]
         particles = np.concatenate([particles,mask],-1)
 
     p4_jets = ef.p4s_from_ptyphims(jets)
@@ -153,13 +168,14 @@ def class_loader(data_path='/pscratch/sd/d/dimathan/LHCO/Data',
     
 
     parts_bkg, jets_bkg, mjj_bkg = SimpleLoader(data_path, file_name, use_SR=use_SR, npart=npart)
-
+    print(f'parts_bkg shape: {parts_bkg.shape}')
     parts_bkg = parts_bkg[:nbkg]
     mjj_bkg = mjj_bkg[:nbkg]
     jets_bkg = jets_bkg[:nbkg]
 
     if nsig>0:
         parts_sig,jets_sig,mjj_sig = SimpleLoader(data_path, 'processed_data_signal_rel.h5', use_SR=use_SR, npart=npart)
+        print(f'parts_sig shape: {parts_sig.shape}')
         parts_sig = parts_sig[:nsig]
         mjj_sig = mjj_sig[:nsig]
         jets_sig = jets_sig[:nsig]
@@ -194,9 +210,9 @@ def DataLoader(n_events,
 
     with h5.File(os.path.join(data_path,file_name),"r") as h5f:
         nevts = min(n_events, h5f['jet_data'][:].shape[0])          # number of events
-        particles = h5f['constituents'][:nevts]
-        jets = h5f['jet_data'][:nevts]
-        mask = h5f['mask'][:nevts]
+        particles = h5f['constituents'][:nevts, :, :npart, :]          # particles
+        jets = h5f['jet_data'][:nevts, :, :npart]
+        mask = h5f['mask'][:nevts, :, :npart]
         particles = np.concatenate([particles,mask],-1)
 
     # print the analytics of the data
@@ -206,6 +222,39 @@ def DataLoader(n_events,
         print(f'Jets shape: {jets.shape}')
         print()
 
+    # shape of particles 
+    #print(f'DataLoader')
+    #print(f'Particles shape: {particles.shape}')
+    #print(f'Jets shape: {jets.shape}')
+    #print(f'particles[0, 0,:20] = {particles[0, 0,:20]}')
+    #print(f'particles[0, 1,:30] = {particles[0, 1,:30]}')
+    #print()
+    # Step 1: Count non-padded particles for both slices
+    #non_padded_counts_0 = np.sum(particles[:, 0, :, -1] == 1, axis=1)  # Shape: (batch_size,)
+    #non_padded_counts_1 = np.sum(particles[:, 1, :, -1] == 1, axis=1)  # Shape: (batch_size,)
+
+    # Step 2: Take the maximum of the two counts for each batch
+    #non_padded_counts = np.maximum(non_padded_counts_0, non_padded_counts_1)  # Shape: (batch_size,)
+
+    #non_padded_counts = np.sum(particles[:, :, :, -1] == 1, axis=(1, 2))  # Shape: (batch_size,)
+    
+    # Step 2: Compute statistics
+    #average_count = np.mean(non_padded_counts)
+    #percentile_90 = np.percentile(non_padded_counts, 90)
+    #percentile_99 = np.percentile(non_padded_counts, 99)
+    #max_count = np.max(non_padded_counts)
+    # Step 3: Count batches with more than 100 non-padded particles
+    #count_more_than_200 = np.sum(non_padded_counts > 200)/particles.shape[0]
+
+    # Print results
+    #print(f'non_padded_counts[0]: {non_padded_counts[0]}')
+    #print(f"Average non-padded particles per batch: {average_count:.2f}")
+    #print(f"90th percentile: {percentile_90}")
+    #print(f"99th percentile: {percentile_99}")
+    #print(f"Maximum non-padded particles per batch: {max_count}")
+    #print(f"Number of batches with more than 200 non-padded particles: {count_more_than_200}")
+
+    #time.sleep(20)
 
     p4_jets = ef.p4s_from_ptyphims(jets)
     # get mjj from p4_jets
@@ -242,7 +291,7 @@ def DataLoader(n_events,
 #---------------------------------------------------------------
 # Construct graphs from input_data and write them to file
 #---------------------------------------------------------------
-def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=100000):
+def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=150000):
     '''
     Construct graphs:
       - Particle graphs are constructed from energyflow dataset
@@ -269,7 +318,7 @@ def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='part
     t_st = time.time()
     # PyG format
     _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=n_events, use_SR=False)
-    _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=n_events, use_SR=True)
+    _construct_particle_graphs_pyg(output_dir, graph_structure, use_SR=True)
 
     print(f'Finished constructing graphs in {time.time() - t_st:.2f} seconds.')
     
@@ -294,7 +343,7 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
 
     # Load data
     if not use_SR:
-        particles, jets, mjj = DataLoader(n_events=n_events, rank=rank)
+        particles, jets, mjj = DataLoader(n_events=n_events, rank=rank, npart=100)
         labels = [0]*len(particles)       
         print(f'particles shape: {particles.shape}')
         print(f'jets shape: {jets.shape}')
@@ -303,7 +352,7 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
 
 
     else:   
-        jets, particles, mjj, labels = class_loader(n_events=1000000, use_SR=True, nsig = 2500)
+        jets, particles, mjj, labels = class_loader(use_SR=True, nbkg = 10000, nsig = 10000, npart=100)
         print(f'particles shape: {particles.shape}')
         print(f'jets shape: {jets.shape}')
         print(f'mjj shape: {mjj.shape}')
