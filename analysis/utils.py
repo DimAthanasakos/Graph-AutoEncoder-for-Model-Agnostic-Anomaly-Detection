@@ -60,7 +60,7 @@ def _preprocessing(particles,jets,mjj,save_json=False, norm = 'mean'):
     n_part = particles.shape[2]
     batch_size = particles.shape[0]
 
-    return particles.astype(np.float32), jets.astype(np.float32)
+    return particles.astype(np.float32), jets.astype(np.float32) # the data is already preprocessed and normalized in the dataset
 
     for ps in particles:
         print(f'ps.shape: {ps.shape}')
@@ -122,13 +122,13 @@ def _preprocessing(particles,jets,mjj,save_json=False, norm = 'mean'):
 
 
 def SimpleLoader(data_path,file_name,use_SR=False,
-                 npart=100,mjjmin=2300,mjjmax=5000):
+                 n_part=100,mjjmin=2300,mjjmax=5000):
 
 
     with h5.File(os.path.join(data_path,file_name),"r") as h5f:
-        particles = h5f['constituents'][:, :, :npart, :]
-        jets = h5f['jet_data'][:, :, :npart]
-        mask = h5f['mask'][:, :, :npart]
+        particles = h5f['constituents'][:, :, :n_part, :]
+        jets = h5f['jet_data'][:, :, :n_part]
+        mask = h5f['mask'][:, :, :n_part]
         particles = np.concatenate([particles,mask],-1)
 
     p4_jets = ef.p4s_from_ptyphims(jets)
@@ -159,7 +159,7 @@ def SimpleLoader(data_path,file_name,use_SR=False,
 
 def class_loader(data_path='/pscratch/sd/d/dimathan/LHCO/Data', 
                  file_name='processed_data_background_rel.h5' , # the default file name for the background data
-                 npart=279,
+                 n_part=279,
                  use_SR=True,
                  nsig=15000,
                  nbkg=120000, # its actually around ~100k in the dataset
@@ -167,14 +167,14 @@ def class_loader(data_path='/pscratch/sd/d/dimathan/LHCO/Data',
                  mjjmax=5000):
     
 
-    parts_bkg, jets_bkg, mjj_bkg = SimpleLoader(data_path, file_name, use_SR=use_SR, npart=npart)
+    parts_bkg, jets_bkg, mjj_bkg = SimpleLoader(data_path, file_name, use_SR=use_SR, n_part=n_part)
     print(f'parts_bkg shape: {parts_bkg.shape}')
     parts_bkg = parts_bkg[:nbkg]
     mjj_bkg = mjj_bkg[:nbkg]
     jets_bkg = jets_bkg[:nbkg]
 
     if nsig>0:
-        parts_sig,jets_sig,mjj_sig = SimpleLoader(data_path, 'processed_data_signal_rel.h5', use_SR=use_SR, npart=npart)
+        parts_sig,jets_sig,mjj_sig = SimpleLoader(data_path, 'processed_data_signal_rel.h5', use_SR=use_SR, n_part=n_part)
         print(f'parts_sig shape: {parts_sig.shape}')
         parts_sig = parts_sig[:nsig]
         mjj_sig = mjj_sig[:nsig]
@@ -197,7 +197,7 @@ def class_loader(data_path='/pscratch/sd/d/dimathan/LHCO/Data',
 def DataLoader(n_events,
                data_path='/pscratch/sd/d/dimathan/LHCO/Data', 
                file_name='processed_data_background_rel.h5' , # the default file name for the background data
-               npart=279,
+               n_part=279,
                n_events_sample = 500,
                ddp = False,
                rank=0,size=1,
@@ -210,9 +210,9 @@ def DataLoader(n_events,
 
     with h5.File(os.path.join(data_path,file_name),"r") as h5f:
         nevts = min(n_events, h5f['jet_data'][:].shape[0])          # number of events
-        particles = h5f['constituents'][:nevts, :, :npart, :]          # particles
-        jets = h5f['jet_data'][:nevts, :, :npart]
-        mask = h5f['mask'][:nevts, :, :npart]
+        particles = h5f['constituents'][:nevts, :, :n_part, :]          # particles
+        jets = h5f['jet_data'][:nevts, :, :n_part]
+        mask = h5f['mask'][:nevts, :, :n_part]
         particles = np.concatenate([particles,mask],-1)
 
     # print the analytics of the data
@@ -291,7 +291,7 @@ def DataLoader(n_events,
 #---------------------------------------------------------------
 # Construct graphs from input_data and write them to file
 #---------------------------------------------------------------
-def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=150000):
+def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=250000, n_part=100):
     '''
     Construct graphs:
       - Particle graphs are constructed from energyflow dataset
@@ -317,8 +317,8 @@ def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='part
     '''
     t_st = time.time()
     # PyG format
-    _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=n_events, use_SR=False)
-    _construct_particle_graphs_pyg(output_dir, graph_structure, use_SR=True)
+    _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=n_events, use_SR=False, n_part = n_part)
+    _construct_particle_graphs_pyg(output_dir, graph_structure, use_SR=True, n_part = n_part)
 
     print(f'Finished constructing graphs in {time.time() - t_st:.2f} seconds.')
     
@@ -328,7 +328,7 @@ def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='part
 #---------------------------------------------------------------
 # Construct graphs from input_data and write them to file
 #---------------------------------------------------------------
-def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000, rank=0, use_SR=False):
+def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000, rank=0, use_SR=False, n_part=100):
     '''
     Construct a list of PyG graphs for the particle-based GNNs, loading from the energyflow dataset
 
@@ -343,7 +343,7 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
 
     # Load data
     if not use_SR:
-        particles, jets, mjj = DataLoader(n_events=n_events, rank=rank, npart=100)
+        particles, jets, mjj = DataLoader(n_events=n_events, rank=rank, n_part=n_part)
         labels = [0]*len(particles)       
         print(f'particles shape: {particles.shape}')
         print(f'jets shape: {jets.shape}')
@@ -352,7 +352,7 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
 
 
     else:   
-        jets, particles, mjj, labels = class_loader(use_SR=True, nbkg = 10000, nsig = 10000, npart=100)
+        jets, particles, mjj, labels = class_loader(use_SR=True, nbkg = 10000, nsig = 10000, n_part=n_part)
         print(f'particles shape: {particles.shape}')
         print(f'jets shape: {jets.shape}')
         print(f'mjj shape: {mjj.shape}')

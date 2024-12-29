@@ -33,7 +33,7 @@ import random
 
 
 class anomaly():
-    def __init__(self, model, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plotstest3') -> None:
+    def __init__(self, model, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plotstest4') -> None:
         self.model_info = model_info
         self.path = model_info['path_SR'] # path to the data (pyg dataset)
         self.ddp = model_info['ddp']

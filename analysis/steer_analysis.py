@@ -35,6 +35,7 @@ class SteerAnalysis(common_base.CommonBase):
         self.rank = int(os.getenv("LOCAL_RANK", "0"))
 
         self.initialize(config_file)
+        self.n_part = self.config['n_part']
         if self.rank == 0:
             print()
             print(self)
@@ -56,21 +57,6 @@ class SteerAnalysis(common_base.CommonBase):
     # Main function
     #---------------------------------------------------------------
     def run_analysis(self):
-        '''
-        For now, we will assume that MC samples have been used to
-        generate a dataset of particles and subjets (subjets_unshuffled.h5).
-        
-        Existing datasets are listed here:
-        https://docs.google.com/spreadsheets/d/1DI_GWwZO8sYDB9FS-rFzitoDk3SjfHfgoKVVGzG1j90/edit#gid=0
-        
-        The graph_constructor module constructs the input graphs to the ML analysis:
-          - graphs_numpy_subjet.h5: builds graphs from JFN output subjets_unshuffled.h5
-          - graphs_pyg_subjet__{graph_key}.pt: builds PyG graphs from subjet_graphs_numpy.h5
-          - graphs_pyg_particle__{graph_key}.pt: builds PyG graphs from energyflow dataset
-        '''
-
-        # If you want to use subjets instead of hadrons, we also need an input file to read the subjets from.
-        # If so, the input file must be one of the files in the google spreadsheet: https://docs.google.com/spreadsheets/d/1DI_GWwZO8sYDB9FS-rFzitoDk3SjfHfgoKVVGzG1j90/edit#gid=0
         t_start = time.time()
 
         # DEBUGGIN
@@ -78,13 +64,15 @@ class SteerAnalysis(common_base.CommonBase):
         # DEBUGGIN
 
         for model in self.models: 
-            for graph_structure in self.config[model]['graph_types']: 
-                graph_key = f'graphs_pyg_SB__{graph_structure}'
-                path = os.path.join(self.output_dir, f'{graph_key}.pt')
-                
-                # this will create both the graphs for pure bkg (SB) and signal+bkg (SR)
-                if self.rank==0 and self.regenerate_graphs or not os.path.exists(path):
-                    utils.construct_graphs(output_dir=self.output_dir, graph_structure=graph_structure)
+            if model in ['EdgeNet', 'GATAE']:
+                for graph_structure in self.config[model]['graph_types']: 
+                    graph_key = f'graphs_pyg_SB__{graph_structure}'
+                    path = os.path.join(self.output_dir, f'{graph_key}.pt')
+                    
+                    # this will create both the graphs for pure bkg (SB) and signal+bkg (SR)
+                    if self.rank==0 and self.regenerate_graphs or not os.path.exists(path):
+                        utils.construct_graphs(output_dir=self.output_dir, graph_structure=graph_structure, n_part = self.n_part)
+                break # only one model for now
 
         if self.rank==0:
             print()
@@ -103,7 +91,6 @@ class SteerAnalysis(common_base.CommonBase):
             print()
 
 
-        # check if the code is running in parallel, and only plot results for one process (same results for all processes)
 
 
 
