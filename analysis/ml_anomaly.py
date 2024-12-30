@@ -72,7 +72,7 @@ class anomaly():
     def run(self):
         self.model.eval()
         # A nodewise criterion
-        criterion_none = torch.nn.MSELoss(reduction='none')
+        criterion_node = torch.nn.MSELoss(reduction='none')
 
         all_scores = []  # this will store the continuous anomaly score
         all_labels = []  # ground-truth anomaly labels (0 or 1)
@@ -86,8 +86,8 @@ class anomaly():
                 out2 = self.model(batch_jets1)
 
                 # 1) Nodewise loss => shape [N, F]
-                loss1_nodewise = criterion_none(out1, batch_jets0.x)
-                loss2_nodewise = criterion_none(out2, batch_jets1.x)
+                loss1_nodewise = criterion_node(out1, batch_jets0.x)
+                loss2_nodewise = criterion_node(out2, batch_jets1.x)
 
                 # 2) Average across features => shape [N]
                 loss1_per_node = loss1_nodewise.mean(dim=-1)

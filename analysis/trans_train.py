@@ -27,6 +27,8 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
+from torch_scatter import scatter_mean
+from sklearn.metrics import roc_curve, auc
 
 import utils
 
@@ -843,7 +845,7 @@ def to_ptrapphim(x, eps=1e-8):
 class ParT():
     
     #---------------------------------------------------------------
-    def __init__(self, model_info):
+    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots/plots_test_tae'):
         '''
         :param model_info: Dictionary of model info, containing the following keys:
                                 'model_settings': dictionary of model settings
@@ -862,7 +864,11 @@ class ParT():
         '''
         
         self.model_info = model_info
-        self.set_ddp = model_info['ddp'] == 'multi'
+        self.set_ddp = model_info['ddp']
+        print(f'set_ddp = {self.set_ddp}')
+        self.plot_path = plot_path
+        if not os.path.exists(plot_path):
+            os.makedirs(plot_path)
 
         if self.set_ddp: 
             self.local_rank = int(os.getenv("LOCAL_RANK"))
@@ -894,6 +900,11 @@ class ParT():
         self.n_train = model_info['n_train']
         self.n_test = model_info['n_test']
         self.n_val = model_info['n_val'] 
+ 
+        self.n_bkg = model_info['model_settings']['n_bkg'] # For classification
+        self.n_sig = model_info['model_settings']['n_sig'] # For classification
+
+
         self.batch_size = self.model_info['model_settings']['batch_size']
         self.patience = self.model_info['model_settings']['patience']
         if self.set_ddp: # Adjust batch size for DDP
@@ -932,13 +943,52 @@ class ParT():
                 raise ValueError('Invalid input_dim at the config file for ParT. Must be 1, 3 or 4') 
 
 
-        self.train_loader, self.val_loader, self.test_loader = self.init_data()
+        self.train_loader, self.val_loader, self.test_loader = self.init_tr_data()
+        self.cl_loader = self.init_cl_data()
 
         self.model = self.init_model()
 
+    #---------------------------------------------------------------
+    def init_cl_data(self):
+        # since we are not training on the cl data, but we are only evaluating the model on it once, we don't need to use ddp 
+        # Load the data for the main process (rank 0)
+        X_ParT, Y_ParT = self.load_particles(use_SR=True)
+
+        # Delete the last-column (pid or masses or E) of the particles
+        X_ParT = X_ParT[:,:,:,:3]
+            
+        non_zero_particles = np.linalg.norm(X_ParT, axis=3) != 0
+        valid_n = non_zero_particles.sum(axis = 2)
+        print('average number of particles per jet:', np.mean(valid_n))
+
+        # Change the order of the features from (pt, eta, phi, pid) to (px, py, pz, E) to agree with the architecture.ParticleTransformer script
+        X_ParT = energyflow.p4s_from_ptyphims(X_ParT)
+
+        # (E, px, py, pz) -> (px, py, pz, E)
+        X_ParT[:,:,:, [0, 1, 2, 3]] = X_ParT[:,:, :, [1, 2, 3, 0]] 
+            
+        # Transpose the data to match the ParticleNet/ParT architecture convention which is (batch_size, n_features, n_particles) 
+        # instead of the current shape (batch_size, n_particles, n_features)
+        X_ParT = np.transpose(X_ParT, (0, 1, 3, 2))
+            
+        if self.graph_transformer:
+            X, Y, graph = self.load_data(X_ParT, Y_ParT, graph_transformer = self.graph_transformer, train=False) 
+        else:
+            X, Y = self.load_data(X_ParT, Y_ParT, graph_transformer = self.graph_transformer, train=False) 
+            graph = None
+
+        X = torch.from_numpy(X).to(self.torch_device).float()
+        Y = torch.from_numpy(Y).to(self.torch_device).float()
+        if self.graph_transformer:
+            cl_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(X, Y, graph), batch_size=self.batch_size, shuffle=False)
+        else:
+            cl_dataset = torch.utils.data.TensorDataset(X, Y)  
+            cl_loader = torch.utils.data.DataLoader(cl_dataset, batch_size=self.batch_size, shuffle=True)
+
+        return cl_loader
 
     #---------------------------------------------------------------
-    def init_data(self):
+    def init_tr_data(self):
         # Choose the dataset to load
         # The jetclass dataset origin: https://github.com/jet-universe/particle_transformer 
         # It has 10 different classes of jets, each class has 10M jets. 
@@ -947,7 +997,7 @@ class ParT():
 
         if self.local_rank == 0:
             # Load the data for the main process (rank 0)
-            self.X_ParT, self.Y_ParT = self.load_particles()
+            self.X_ParT, self.Y_ParT = self.load_particles(use_SR=False)
 
             print(f'X_ParT.shape: {self.X_ParT.shape}')
 
@@ -1065,15 +1115,19 @@ class ParT():
         return train_loader, val_loader, test_loader
     
     #---------------------------------------------------------------
-    def load_particles(self):
+    def load_particles(self, use_SR=False):
         ''' 
         Load the particles from the jetclass/energyflow dataset. 
         '''
         
         device = self.torch_device
         # TODO: n_part, n_events
-        particles, jets, mjj = utils.DataLoader(n_events=self.n_total, rank=0, n_part=self.n_part)
-        labels = [0]*len(particles)       
+        if not use_SR:
+            particles, jets, mjj = utils.DataLoader(n_events=self.n_total, rank=0, n_part=self.n_part)
+            labels = [0]*len(particles)       
+        elif use_SR:
+            jets, particles, mjj, labels = utils.class_loader(use_SR=True, nbkg = self.n_bkg, nsig = self.n_sig, n_part=self.n_part)
+
         print(f'particles shape: {particles.shape}')
         print(f'jets shape: {jets.shape}')
         print(f'mjj shape: {mjj.shape}')
@@ -1083,17 +1137,9 @@ class ParT():
 
         return particles, labels
 
-        if classification_task == 'qvsg': 
-            # Load the four-vectors directly from the quark vs gluon data set
-            X_ParT, Y_ParT = energyflow.datasets.qg_jets.load(num_data=n_total, pad=True, 
-                                                                        generator='pythia',  # Herwig is also available
-                                                                        with_bc=False        # Turn on to enable heavy quarks
-                                                                        )                    # X_PFN.shape = (n_jets, n_particles per jet, n_variables)  
-        return X_ParT, Y_ParT
-
 
     #---------------------------------------------------------------
-    def load_data(self, X, Y, graph_transformer = False, sorting_key = None):
+    def load_data(self, X, Y, graph_transformer = False, sorting_key = None, train=True):
         ''' 
         Split the data into training, validation and test sets depending on the specifics of the model.
         '''
@@ -1140,6 +1186,9 @@ class ParT():
 
                 print(f"Time to create the graph = {time.time() - t_st} seconds")
              
+            if not train: # classification 
+                return X, Y, graph
+            
             (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test, 
             graph_train, graph_val, graph_test) = energyflow.utils.data_split(X, Y, graph.numpy(),
                                                                               val=self.n_val, test=self.n_test, shuffle = True)
@@ -1149,10 +1198,11 @@ class ParT():
        
         # For the case of Vanilla Particle Transformer
         else: 
-            print(f'X.shape: {X.shape}')
-            print(f'Y.shape: {len(Y)}')
-            print(type(X), type(Y))
-            Y = np.array(Y)
+            if not train: # classification
+                Y = np.array(Y)
+                return X, Y
+            
+            Y = np.array(Y) # cause we've defined Y as a python list
             (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test) = energyflow.utils.data_split(X, Y,
                                                                                                                                val=self.n_val, test=self.n_test)
             return (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test)
@@ -1199,6 +1249,8 @@ class ParT():
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=self.patience, verbose=True)
 
         best_val_loss = math.inf        
+        best_model_path = os.path.join(self.output_dir, 'tae_best.pt')  # Path for saving the best model
+
         if self.set_ddp:
             torch.cuda.set_device(self.local_rank)
             self.model = DDP(self.model, device_ids=[self.local_rank] )
@@ -1206,7 +1258,8 @@ class ParT():
                 print()
                 print('We change the batch size to 1/#GPUS of the original (config file) in order to retain the original batch size for the DDP model.')
                 print()
-        
+                
+        torch.autograd.set_detect_anomaly(True)
         for epoch in range(1, self.epochs+1):
             if self.set_ddp: self.train_sampler.set_epoch(epoch)  
 
@@ -1215,11 +1268,9 @@ class ParT():
             loss_test = self._test_part(self.test_loader,)
             loss_val = self._test_part(self.val_loader, )
             # Save the model with the best test AUC
-            if loss_val > best_val_loss:
+            if loss_val < best_val_loss:
                 best_val_loss = loss_val
-                best_model_params = self.model.state_dict()
-                # store the model with the best test AUC
-                #if self.save_model: best_model_params = self.model.state_dict()
+                torch.save(self.model.state_dict(), best_model_path)
             
             if self.local_rank == 0:
                 print("--------------------------------")
@@ -1230,9 +1281,20 @@ class ParT():
             print(f'--------------------------------')
             print(f'Finished training')
             print()
+            self._plot_loss()
 
-   
-        return 
+
+        # Load the best model before returning
+        self.model.load_state_dict(torch.load(best_model_path))  # Load best model's state_dict
+        print("Loaded the best model based on validation loss.")
+        loss_val = self._test_part(self.val_loader,)
+        loss_test = self._test_part(self.test_loader,)
+        print(f'Best model validation loss: {loss_val:.4f}')
+        print(f'Best model test loss: {loss_test:.4f}')
+
+
+        return self.model
+
 
         
     #---------------------------------------------------------------
@@ -1274,14 +1336,13 @@ class ParT():
                 x0, x1 = jet0, jet1
 
             # forward + backward + optimize
-                
             out0 = self.model(x = x0, v = jet0, graph = graph)
             out1 = self.model(x = x1, v = jet1, graph = graph)
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
 
-            loss0 = self.criterion(out0, p3_0)
-            loss1 = self.criterion(out1, p3_1)
+            loss0 = self.criterion(out0, p3_0) * 100 
+            loss1 = self.criterion(out1, p3_1) * 100 
             loss = loss0 + loss1
             loss.backward()
             self.optimizer.step()
@@ -1334,11 +1395,238 @@ class ParT():
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
             
-            loss0 = self.criterion(out0, p3_0)
-            loss1 = self.criterion(out1, p3_1)
+            loss0 = self.criterion(out0, p3_0) * 100 
+            loss1 = self.criterion(out1, p3_1) * 100 
             loss = loss0 + loss1
 
             loss_cum += loss.item()*length
             count += length
         
         return loss_cum/count
+
+
+
+    #---------------------------------------------------------------
+    @torch.no_grad()
+    def _plot_loss(self):
+        self.model.eval()
+        event_losses = []
+        # A nodewise criterion
+        criterion_node = torch.nn.MSELoss(reduction='none') # This 
+        with torch.no_grad():
+            for index, data in enumerate(self.test_loader):
+                inputs, labels = data[0], data[1]   
+                inputs = inputs.to(self.torch_device)
+
+                jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
+                length = jet0.shape[0]
+
+
+                if self.graph_transformer: graph = data[2].to(self.torch_device)
+                else:  graph = None
+                
+                # zero the parameter gradients
+                self.optimizer.zero_grad()
+
+                p3_0 = to_ptrapphim(jet0)
+                p3_1 = to_ptrapphim(jet1)
+                if self.input_dim == 1:
+                    # create pt of each particle instead of (px, py, pz, E) for the input 
+                    x0 = p3_0[:, 0, :].unsqueeze(1)
+                    x1 = p3_1[:, 0, :].unsqueeze(1)
+
+                elif self.input_dim == 3: 
+                    x0 = p3_0
+                    x1 = p3_1
+
+                else:
+                    x0, x1 = jet0, jet1
+
+                out0 = self.model(x = x0, v = jet0, graph = graph)
+                out1 = self.model(x = x1, v = jet1, graph = graph)
+                p3_0 = p3_0.permute(0, 2, 1)
+                p3_1 = p3_1.permute(0, 2, 1)
+
+                # 1) Nodewise loss => shape [N, F]
+                loss0_nodewise = criterion_node(out0, p3_0) * 100 
+                loss1_nodewise = criterion_node(out1, p3_1) * 100 
+
+                # 2) Average across features => shape [N]
+                loss0_per_node = loss0_nodewise.mean(dim=-1)
+                loss1_per_node = loss1_nodewise.mean(dim=-1)
+
+                loss0_per_graph = loss0_per_node.sum(dim=1)/p3_0.shape[1]
+                loss1_per_graph = loss1_per_node.sum(dim=1)/p3_1.shape[1]
+
+                # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
+                #loss0_per_graph = scatter_mean(loss0_per_node, p3_0, dim=0)
+                #loss1_per_graph = scatter_mean(loss1_per_node, p3_1, dim=0)
+
+                # 4) Compute the combined loss for each graph and append to event_losses
+                scores = (loss0_per_graph + loss1_per_graph)  # Shape: [G]
+                event_losses.extend(scores.cpu().tolist())  # Convert to list and extend
+
+        plot_file = os.path.join(self.plot_path, 'val_loss_distribution.pdf')
+
+        loss_tot  =  event_losses
+
+        # Example: Compute quantiles for loss0_array and loss1_array
+        quantiles_loss = {
+            "50%": np.quantile(loss_tot, 0.5),  # 50% quantile (median)
+            "70%": np.quantile(loss_tot, 0.7),  # 70% quantile
+            "80%": np.quantile(loss_tot, 0.8),  # 80% quantile
+            "90%": np.quantile(loss_tot, 0.9),  # 90% quantile
+        }
+        
+        p99 = np.quantile(loss_tot, 0.99) # 99% quantile
+        num_bins = 75
+        bins = np.linspace(0, p99, num_bins) 
+        print(f'--------------------------------')
+        #print the average loss
+        print(f"Average loss per event: {np.mean(loss_tot):.4f} ")
+        print(f"Quantiles for the loss per jet: {quantiles_loss}")
+        print()
+
+        # Plot each distribution with a different color
+        plt.figure(figsize=(8, 6))
+        plt.hist(loss_tot, bins=bins, color='blue', histtype='step', label='Loss of test set (bkg)', density=True )
+        #plt.hist(loss1_array, bins=100, color='red',  histtype='step', label='Loss 1')
+        plt.xlabel('Loss')
+        plt.ylabel('Counts')
+        plt.title('Comparison of Two Loss Distributions')
+        plt.legend()
+        plt.tight_layout()
+
+        plt.savefig(plot_file, dpi=300)
+        plt.close()
+        print(f"Saved loss distribution plot to: {plot_file}")
+        print()
+
+        return quantiles_loss
+
+
+
+
+
+    #---------------------------------------------------------------
+    def run_anomaly(self):
+        self.model.eval()
+        # A nodewise criterion
+        criterion_node = torch.nn.MSELoss(reduction='none')
+
+        all_scores = []  # this will store the continuous anomaly score
+        all_labels = []  # ground-truth anomaly labels (0 or 1)
+
+        with torch.no_grad():
+            for index, data in enumerate(self.cl_loader):
+                inputs, labels = data[0], data[1]   
+                inputs = inputs.to(self.torch_device)
+
+                jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
+                length = jet0.shape[0]
+
+                if self.graph_transformer: graph = data[2].to(self.torch_device)
+                else:  graph = None
+                
+                # zero the parameter gradients
+                self.optimizer.zero_grad()
+
+                p3_0 = to_ptrapphim(jet0)
+                p3_1 = to_ptrapphim(jet1)
+                if self.input_dim == 1:
+                    # create pt of each particle instead of (px, py, pz, E) for the input 
+                    x0 = p3_0[:, 0, :].unsqueeze(1)
+                    x1 = p3_1[:, 0, :].unsqueeze(1)
+
+                elif self.input_dim == 3: 
+                    x0 = p3_0
+                    x1 = p3_1
+
+                else:
+                    x0, x1 = jet0, jet1
+
+                out0 = self.model(x = x0, v = jet0, graph = graph)
+                out1 = self.model(x = x1, v = jet1, graph = graph)
+                p3_0 = p3_0.permute(0, 2, 1)
+                p3_1 = p3_1.permute(0, 2, 1)
+
+                # 1) Nodewise loss => shape [N, F]
+                loss0_nodewise = criterion_node(out0, p3_0)
+                loss1_nodewise = criterion_node(out1, p3_1)
+
+                # 2) Average across features => shape [N]
+                loss0_per_node = loss0_nodewise.mean(dim=-1)
+                loss1_per_node = loss1_nodewise.mean(dim=-1)
+
+                loss0_per_graph = loss0_per_node.sum(dim=1)/p3_0.shape[1]
+                loss1_per_graph = loss1_per_node.sum(dim=1)/p3_1.shape[1]
+
+                # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
+                #loss0_per_graph = scatter_mean(loss0_per_node, p3_0, dim=0)
+                #loss1_per_graph = scatter_mean(loss1_per_node, p3_1, dim=0)
+
+                # 4) Compute the combined loss for each graph and append to event_losses
+                scores = (loss0_per_graph + loss1_per_graph)  
+                all_scores.extend(scores.cpu().tolist())
+                all_labels.extend(labels.cpu().tolist())
+
+                # ----- Compute ROC and AUC -----
+                fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
+                auc_val = auc(fpr, tpr)
+
+
+        print(f"Area Under Curve (AUC): {auc_val:.4f}")
+
+        # ----- Plot the ROC curve -----
+        plot_file = os.path.join(self.plot_path, "roc_curve.pdf")
+        plt.figure(figsize=(6, 5))
+        plt.plot(fpr, tpr, label=f'ROC (AUC = {auc_val:.3f})', color='b')
+        plt.plot([0, 1], [0, 1], 'k--')  # diagonal line for "random" classification
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.title("ROC Curve")
+        plt.legend(loc="lower right")
+        plt.tight_layout()
+
+        # Save the plot
+        plt.savefig(plot_file, dpi=300)
+        plt.close()
+
+
+        # ------------------------------------------------
+        # 2) Plot loss distribution by label (normalized)
+        # ------------------------------------------------
+        normal_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 0]
+        anomalous_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 1]
+
+
+        # Compute the 99th percentile for both distributions
+        p99_normal = np.percentile(normal_scores, 99)
+        p99_anomalous = np.percentile(anomalous_scores, 99)
+
+        # Determine the x-axis limit (max of the two 95th percentiles)
+        x_max = max(p99_normal, p99_anomalous)
+
+        # Define the bin edges based on [0, x_max]
+        num_bins = 75  # Number of bins
+        bin_edges = np.linspace(0, x_max, num_bins + 1)  # Create bins in the range [0, x_max]
+
+        #all_scores_combined = normal_scores + anomalous_scores  # Combine all scores
+        #bin_edges = np.histogram_bin_edges(all_scores_combined, bins=100)  # Compute bin edges
+
+        dist_plot_file = os.path.join(self.plot_path, "loss_distribution_of_sig_vs_bkg.pdf")
+
+        plt.figure(figsize=(6, 5))
+        # density=True => each histogram integrates to 1, letting you compare shapes
+        plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
+        plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+
+        plt.xlabel("Loss Score")
+        plt.xlim(0, x_max)
+        plt.ylabel("Density")
+        plt.title("Loss Distribution by Label (Normalized)")
+        plt.legend(loc="upper right")
+        plt.tight_layout()
+        plt.savefig(dist_plot_file, dpi=300)
+        plt.close()
+        print(f"Saved loss distribution plot to: {dist_plot_file}")

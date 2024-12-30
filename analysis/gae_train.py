@@ -254,7 +254,6 @@ class gae():
 
     #---------------------------------------------------------------
     @torch.no_grad()
-    # TODO: something is wrong here since the loss is ~20k bigger  than the training loss, copy the code from ml_anomaly.py
     def _plot_loss(self):
         self.model.eval()
         event_losses = []

@@ -107,8 +107,9 @@ class MLAnalysis(common_base.CommonBase):
                 model_key = f'{model}'
                 model_info_temp = model_info.copy()
                 model_info_temp['model_key'] = model_key
-                model = trans_train.ParT(model_info_temp).train()
-                #self.AUC = trans_anomaly.anomaly(model, model_info).run()
+                mdl = trans_train.ParT(model_info_temp)
+                model = mdl.train()
+                self.AUC = mdl.run_anomaly()
 
             else:
                 model_key = f'{model}'

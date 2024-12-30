@@ -218,7 +218,7 @@ class Embed(nn.Module):
     def __init__(self, input_dim, dims, normalize_input=True, activation='gelu'):
         super().__init__()
 
-        self.input_bn = nn.BatchNorm1d(input_dim) if normalize_input else None
+        self.input_bn = nn.SyncBatchNorm(input_dim) if normalize_input else None
         module_list = []
         starting_dim = input_dim
         for index, dim in enumerate(dims):
@@ -232,7 +232,7 @@ class Embed(nn.Module):
         self.embed = nn.Sequential(*module_list)
 
     def forward(self, x):
-
+        
         if self.input_bn is not None:
             # x: (batch, embed_dim, seq_len)
             x = self.input_bn(x)
