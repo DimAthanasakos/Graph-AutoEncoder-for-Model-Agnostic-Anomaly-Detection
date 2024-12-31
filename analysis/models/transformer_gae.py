@@ -223,7 +223,8 @@ class Embed(nn.Module):
         starting_dim = input_dim
         for index, dim in enumerate(dims):
             module_list.extend([
-                nn.LayerNorm(input_dim) if starting_dim > 1  else nn.Identity(), # LayerNorm averages across the feature space for the same particle. For 1d input space this leads to a random classifier.
+                # WARNING THE >2 WAS >1
+                nn.LayerNorm(input_dim) if starting_dim > 2  else nn.Identity(), # LayerNorm averages across the feature space for the same particle. For 1d input space this leads to a random classifier.
                                                                                  # Surprisingly, for 1d input space, although we can use LayerNorm for later layers, this decreases the performance. 
                 nn.Linear(input_dim, dim),
                 nn.GELU() if activation == 'gelu' else nn.ReLU(),
@@ -461,11 +462,11 @@ class Encoder(nn.Module):
                  pair_extra_dim=0, # ?
                  remove_self_pair=False,
                  use_pre_activation_pair=True,
-                 embed_dims=[128, 512, 128],   # the MLP for transforming the particle features input 
-                 pair_embed_dims=[64, 64, 64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
+                 embed_dims=[8, 16], #[128, 512, 128],   # the MLP for transforming the particle features input 
+                 pair_embed_dims=[8, 8, ], #64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
                                                # one more layers to this to match the number of heads in the attention layer.
-                 num_heads=4,  # how many attention heads in each particle attention block
-                 num_layers=4, # how many particle attention blocks
+                 num_heads=1,  # how many attention heads in each particle attention block
+                 num_layers=1, # how many particle attention blocks
                  block_params=None,
                  activation='gelu',
                  # misc
@@ -483,7 +484,7 @@ class Encoder(nn.Module):
 
         embed_dim = embed_dims[-1] if len(embed_dims) > 0 else input_dim
         default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=4,
-                           dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
+                           dropout=0., attn_dropout=0., activation_dropout=0.,
                            add_bias_kv=False, activation=activation,
                            scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True)
 
@@ -508,12 +509,12 @@ class Encoder(nn.Module):
 
         self.proj_to_2d = nn.Linear(embed_dim, 2)
 
-    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, graph = None):
+    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, graph = None, pr=False):
         # x: (N, C, P)
         # v: (N, 4, P) [px,py,pz,energy] from which we construct the interaction terms between pairs of particles
         # mask: (N, 1, P) -- real particle = 1, padded = 0
         # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs): Sparce format for indexing the pairs  
-
+        st = x # save the input for later use
         batch_size, _, num_particles = x.size()
         with torch.no_grad():
             if not self.for_inference: # if training 
@@ -532,9 +533,13 @@ class Encoder(nn.Module):
             # pair embedding to get the interaction terms between pairs of particles -> Acts as the bias in the attention layer of the particle attn block.
 
             attn_mask = None
-            if (v is not None or uu is not None) and self.pair_embed is not None:
+            if False and (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
-            
+                if pr:
+                    print(f'attn_mask.shape: {attn_mask.shape}')
+                    print(f'attn_mask[0, :5, :5]: {attn_mask[0, :5, :5]}')
+                    print()
+
             # filter the attn_mask with the graph that was constructed in models.ParticleTransformer. Otherwise, full transformer is used.
             if graph is not None:
                 bool_mask =  graph.unsqueeze(1).repeat(1, self.num_heads, 1, 1).reshape(batch_size*self.num_heads, 
@@ -550,14 +555,18 @@ class Encoder(nn.Module):
 
             # reshape x to (batch_size, 2, num_particles)
             x = x.permute(1, 2, 0) 
+            if pr:
+                print(f'x.shape: {x.shape}')
+                print(f'x[0, :, :5]: {x[0, :, :5]}')
+                print()
             return x
 
 
 class Decoder(nn.Module):
     def __init__(self, 
-                 embed_dims=[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
+                 embed_dims=[8, 16], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
                  num_heads=4,  # how many attention heads in each particle attention block
-                 num_layers=4, # how many particle attention blocks
+                 num_layers=2, # how many particle attention blocks
                  activation='gelu',
                  use_amp=False,
                  **kwargs):
@@ -569,7 +578,7 @@ class Decoder(nn.Module):
 
         embed_dim = embed_dims[-1] if len(embed_dims) > 0 else 2
         default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=4,
-                           dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
+                           dropout=0., attn_dropout=0., activation_dropout=0.,
                            add_bias_kv=False, activation=activation,
                            scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True)
 
@@ -579,7 +588,7 @@ class Decoder(nn.Module):
         self.proj_to_3d = nn.Linear(embed_dim, 3)
 
 
-    def forward(self, x):
+    def forward(self, x, pr=False):
         
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             # check if we need to mask the padded particles here.
@@ -597,7 +606,7 @@ class TAE(nn.Module):
         self.encoder = Encoder(**encoder_cfg)
         self.decoder = Decoder(**decoder_cfg)
 
-    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, graph=None):
-        x = self.encoder(x, v, mask, uu, uu_idx, graph)
-        x = self.decoder(x)
+    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, graph=None, pr=False):
+        x = self.encoder(x, v, mask, uu, uu_idx, graph, pr)
+        x = self.decoder(x, pr)
         return x

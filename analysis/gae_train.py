@@ -170,7 +170,7 @@ class gae():
             # only print if its the main process
             if self.rank == 0:
                 print("--------------------------------")
-                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.6f}, Time: {time.time() - t_start:.1f} sec')
+                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.6f}, loss_val: {loss_val:.6f}, loss_test: {loss_test:.6f}, lr: {self.optimizer.param_groups[0]["lr"]:.6f}, Time: {time.time() - t_start:.1f} sec')
 
             if loss_val < best_val_loss:
                 best_val_loss = loss_val
@@ -191,8 +191,8 @@ class gae():
         print("Loaded the best model based on validation loss.")
         loss_val = self._test_loop(self.val_loader,)
         loss_test = self._test_loop(self.test_loader,)
-        print(f'Best model validation loss: {loss_val:.4f}')
-        print(f'Best model test loss: {loss_test:.4f}')
+        print(f'Best model validation loss: {loss_val:.5f}')
+        print(f'Best model test loss: {loss_test:.5f}')
 
 
         return self.model
@@ -215,7 +215,7 @@ class gae():
             loss0 = self.criterion(out0, batch_jets0.x) * 100 # multiply by 1000 to scale the loss
             loss1 = self.criterion(out1, batch_jets1.x) * 100
             loss = loss0 + loss1
-
+            #print(f'loss: {loss.item()}')
             loss.backward()
             self.optimizer.step()
             loss_cum += loss.item() * length
@@ -268,16 +268,16 @@ class gae():
                 out2 = self.model(batch_jets1)
 
                 # 1) Nodewise loss => shape [N, F]
-                loss1_nodewise = criterion_node(out1, batch_jets0.x)
-                loss2_nodewise = criterion_node(out2, batch_jets1.x)
+                loss1_nodewise = criterion_node(out1, batch_jets0.x) * 100
+                loss2_nodewise = criterion_node(out2, batch_jets1.x) * 100
 
                 # 2) Average across features => shape [N]
                 loss1_per_node = loss1_nodewise.mean(dim=-1)
                 loss2_per_node = loss2_nodewise.mean(dim=-1)
 
                 # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
-                loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0) * 100
-                loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0) * 100
+                loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0)
+                loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0)
 
                 # 4) Compute the combined loss for each graph and append to event_losses
                 scores = (loss1_per_graph + loss2_per_graph)  # Shape: [G]

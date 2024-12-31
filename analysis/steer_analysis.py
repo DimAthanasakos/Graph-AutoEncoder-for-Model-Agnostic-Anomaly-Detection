@@ -24,7 +24,7 @@ class SteerAnalysis(common_base.CommonBase):
     #---------------------------------------------------------------
     # Constructor
     #---------------------------------------------------------------
-    def __init__(self, input_file='', config_file='', output_dir='', regenerate_graphs=False, use_precomputed_graphs=False, ddp = False, **kwargs):
+    def __init__(self, input_file='', config_file='', output_dir='', regenerate_graphs=False, use_precomputed_graphs=False, ddp = False, model=None):
 
         self.config_file = config_file
         self.input_file = input_file
@@ -36,6 +36,10 @@ class SteerAnalysis(common_base.CommonBase):
 
         self.initialize(config_file)
         self.n_part = self.config['n_part']
+        
+        if model is None: self.models = self.config['models']
+        else: self.models = [model]
+
         if self.rank == 0:
             print()
             print(self)
@@ -50,7 +54,6 @@ class SteerAnalysis(common_base.CommonBase):
 
         with open(config_file, 'r') as stream:
             self.config = yaml.safe_load(stream)
-        self.models = self.config['models']
 
 
     #---------------------------------------------------------------
@@ -80,7 +83,7 @@ class SteerAnalysis(common_base.CommonBase):
             print('Running ML analysis...')
 
 
-        analysis = ml_analysis.MLAnalysis(self.config_file, self.output_dir, self.ddp)
+        analysis = ml_analysis.MLAnalysis(self.config_file, self.output_dir, self.ddp, self.models)
         analysis.train_models()
     
         if self.rank==0:
@@ -114,7 +117,10 @@ if __name__ == "__main__":
     parser.add_argument('--use_precomputed_graphs', 
                         help='use graphs from subjets_unshuffled.h5', 
                         action='store_true', default=False)
-    
+    parser.add_argument('--model', 
+                        help='Model to use for analysis', 
+                        action='store', type=str,
+                        default=None, )
     parser.add_argument('--multi', action='store_true', default=False,help='Mutli-GPU training')
 
     
@@ -135,5 +141,5 @@ if __name__ == "__main__":
                              output_dir=args.output_dir, 
                              regenerate_graphs=args.regenerate_graphs,
                              use_precomputed_graphs=args.use_precomputed_graphs,
-                             ddp=args.multi, )
+                             ddp=args.multi, model = args.model)
     analysis.run_analysis()

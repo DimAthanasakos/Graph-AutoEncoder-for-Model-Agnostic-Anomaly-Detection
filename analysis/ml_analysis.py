@@ -24,12 +24,14 @@ class MLAnalysis(common_base.CommonBase):
     #---------------------------------------------------------------
     # Constructor
     #---------------------------------------------------------------
-    def __init__(self, config_file='', output_dir='', ddp=False, **kwargs):
+    def __init__(self, config_file='', output_dir='', ddp=False, models = None, **kwargs):
         super(common_base.CommonBase, self).__init__(**kwargs)
         
         self.config_file = config_file
         self.output_dir = output_dir
-        self.ddp = ddp
+        self.ddp = ddp  
+        self.models = models
+        
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
         
@@ -74,7 +76,6 @@ class MLAnalysis(common_base.CommonBase):
         self.val_frac  = 1. * self.n_val /  self.n_total
 
         # Initialize model-specific settings
-        self.models = config['models']
         self.model_settings = {}
         for model in self.models:
             self.model_settings[model] = config[model]
