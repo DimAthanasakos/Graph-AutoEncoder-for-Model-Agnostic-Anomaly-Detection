@@ -168,14 +168,14 @@ def class_loader(data_path='/pscratch/sd/d/dimathan/LHCO/Data',
     
 
     parts_bkg, jets_bkg, mjj_bkg = SimpleLoader(data_path, file_name, use_SR=use_SR, n_part=n_part)
-    print(f'parts_bkg shape: {parts_bkg.shape}')
+    #print(f'parts_bkg shape: {parts_bkg.shape}')
     parts_bkg = parts_bkg[:nbkg]
     mjj_bkg = mjj_bkg[:nbkg]
     jets_bkg = jets_bkg[:nbkg]
 
     if nsig>0:
         parts_sig,jets_sig,mjj_sig = SimpleLoader(data_path, 'processed_data_signal_rel.h5', use_SR=use_SR, n_part=n_part)
-        print(f'parts_sig shape: {parts_sig.shape}')
+        #print(f'parts_sig shape: {parts_sig.shape}')
         parts_sig = parts_sig[:nsig]
         mjj_sig = mjj_sig[:nsig]
         jets_sig = jets_sig[:nsig]

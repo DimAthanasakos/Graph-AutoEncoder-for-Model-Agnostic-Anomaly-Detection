@@ -907,8 +907,8 @@ class ParT():
 
         self.batch_size = self.model_info['model_settings']['batch_size']
         self.patience = self.model_info['model_settings']['patience']
-        if self.set_ddp: # Adjust batch size for DDP
-            self.batch_size = self.batch_size // torch.cuda.device_count()
+        #if self.set_ddp: # Adjust batch size for DDP
+        #    self.batch_size = self.batch_size // torch.cuda.device_count()
         if self.local_rank == 0:
             print(f'batch_size: {self.batch_size}')
 
@@ -956,11 +956,12 @@ class ParT():
 
         # Delete the last-column (pid or masses or E) of the particles
         X_ParT = X_ParT[:,:,:,:3]
-            
-        non_zero_particles = np.linalg.norm(X_ParT, axis=3) != 0
-        valid_n = non_zero_particles.sum(axis = 2)
-        print('average number of particles per jet:', np.mean(valid_n))
-
+        if self.local_rank == 0:
+            non_zero_particles = np.linalg.norm(X_ParT, axis=3) != 0
+            valid_n = non_zero_particles.sum(axis = 2)
+            print('average number of particles per jet:', np.mean(valid_n))
+        
+    
         # Change the order of the features from (pt, eta, phi, pid) to (px, py, pz, E) to agree with the architecture.ParticleTransformer script
         X_ParT = energyflow.p4s_from_ptyphims(X_ParT)
 
@@ -1128,10 +1129,11 @@ class ParT():
         elif use_SR:
             jets, particles, mjj, labels = utils.class_loader(use_SR=True, nbkg = self.n_bkg, nsig = self.n_sig, n_part=self.n_part)
 
-        print(f'particles shape: {particles.shape}')
-        print(f'jets shape: {jets.shape}')
-        print(f'mjj shape: {mjj.shape}')
-        print(f'labels shape: {len(labels)}')
+        if self.local_rank == 0:
+            print(f'particles shape: {particles.shape}')
+            print(f'jets shape: {jets.shape}')
+            print(f'mjj shape: {mjj.shape}')
+            print(f'labels shape: {len(labels)}')
 
         particles, jets = utils._preprocessing(particles, jets, mjj, norm = 'mean')
 
@@ -1217,7 +1219,6 @@ class ParT():
         enc_cfg = dict(input_dim = self.input_dim, pair_input_dim = self.pair_input_dim) 
         dec_cfg = dict()
         model = transformer_gae.TAE(enc_cfg, dec_cfg) # 4 features: (px, py, pz, E)
-        print(f'self.input_dim = {self.input_dim}')
         
         model = model.to(self.torch_device)
         #model = torch.compile(model)
@@ -1253,11 +1254,8 @@ class ParT():
 
         if self.set_ddp:
             torch.cuda.set_device(self.local_rank)
-            self.model = DDP(self.model, device_ids=[self.local_rank] )
-            if self.local_rank == 0:
-                print()
-                print('We change the batch size to 1/#GPUS of the original (config file) in order to retain the original batch size for the DDP model.')
-                print()
+            self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model) # SyncBatchNorm for DDP, else it will throw an error due to inplace operations in encoder-decoder
+            self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
                 
         torch.autograd.set_detect_anomaly(True)
         for epoch in range(1, self.epochs+1):
@@ -1267,12 +1265,14 @@ class ParT():
             loss_train = self._train_part()
             loss_test = self._test_part(self.test_loader,)
             loss_val = self._test_part(self.val_loader, )
-            # Save the model with the best test AUC
-            if loss_val < best_val_loss:
-                best_val_loss = loss_val
-                torch.save(self.model.state_dict(), best_model_path)
+            
             
             if self.local_rank == 0:
+                # Save the model with the best test AUC
+                if loss_val < best_val_loss:
+                    best_val_loss = loss_val
+                    torch.save(self.model.state_dict(), best_model_path)
+
                 print("--------------------------------")
                 print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.6f}, Time: {time.time() - t_start:.1f} sec')
         
@@ -1286,11 +1286,12 @@ class ParT():
 
         # Load the best model before returning
         self.model.load_state_dict(torch.load(best_model_path))  # Load best model's state_dict
-        print("Loaded the best model based on validation loss.")
-        loss_val = self._test_part(self.val_loader,)
-        loss_test = self._test_part(self.test_loader,)
-        print(f'Best model validation loss: {loss_val:.4f}')
-        print(f'Best model test loss: {loss_test:.4f}')
+        if self.local_rank == 0:
+            print("Loaded the best model based on validation loss.")
+            loss_val = self._test_part(self.val_loader,)
+            loss_test = self._test_part(self.test_loader,)
+            print(f'Best model validation loss: {loss_val:.4f}')
+            print(f'Best model test loss: {loss_test:.4f}')
 
 
         return self.model
@@ -1510,123 +1511,127 @@ class ParT():
 
     #---------------------------------------------------------------
     def run_anomaly(self):
-        self.model.eval()
-        # A nodewise criterion
-        criterion_node = torch.nn.MSELoss(reduction='none')
+        if self.local_rank == 0:
+            self.model.eval()
+            # A nodewise criterion
+            criterion_node = torch.nn.MSELoss(reduction='none')
 
-        all_scores = []  # this will store the continuous anomaly score
-        all_labels = []  # ground-truth anomaly labels (0 or 1)
+            all_scores = []  # this will store the continuous anomaly score
+            all_labels = []  # ground-truth anomaly labels (0 or 1)
 
-        with torch.no_grad():
-            for index, data in enumerate(self.cl_loader):
-                inputs, labels = data[0], data[1]   
-                inputs = inputs.to(self.torch_device)
+            with torch.no_grad():
+                for index, data in enumerate(self.cl_loader):
+                    inputs, labels = data[0], data[1]   
+                    inputs = inputs.to(self.torch_device)
 
-                jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
-                length = jet0.shape[0]
+                    jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
+                    length = jet0.shape[0]
 
-                if self.graph_transformer: graph = data[2].to(self.torch_device)
-                else:  graph = None
-                
-                # zero the parameter gradients
-                self.optimizer.zero_grad()
+                    if self.graph_transformer: graph = data[2].to(self.torch_device)
+                    else:  graph = None
+                    
+                    # zero the parameter gradients
+                    self.optimizer.zero_grad()
 
-                p3_0 = to_ptrapphim(jet0)
-                p3_1 = to_ptrapphim(jet1)
-                if self.input_dim == 1:
-                    # create pt of each particle instead of (px, py, pz, E) for the input 
-                    x0 = p3_0[:, 0, :].unsqueeze(1)
-                    x1 = p3_1[:, 0, :].unsqueeze(1)
+                    p3_0 = to_ptrapphim(jet0)
+                    p3_1 = to_ptrapphim(jet1)
+                    if self.input_dim == 1:
+                        # create pt of each particle instead of (px, py, pz, E) for the input 
+                        x0 = p3_0[:, 0, :].unsqueeze(1)
+                        x1 = p3_1[:, 0, :].unsqueeze(1)
 
-                elif self.input_dim == 3: 
-                    x0 = p3_0
-                    x1 = p3_1
+                    elif self.input_dim == 3: 
+                        x0 = p3_0
+                        x1 = p3_1
 
-                else:
-                    x0, x1 = jet0, jet1
+                    else:
+                        x0, x1 = jet0, jet1
 
-                out0 = self.model(x = x0, v = jet0, graph = graph)
-                out1 = self.model(x = x1, v = jet1, graph = graph)
-                p3_0 = p3_0.permute(0, 2, 1)
-                p3_1 = p3_1.permute(0, 2, 1)
+                    out0 = self.model(x = x0, v = jet0, graph = graph)
+                    out1 = self.model(x = x1, v = jet1, graph = graph)
+                    p3_0 = p3_0.permute(0, 2, 1)
+                    p3_1 = p3_1.permute(0, 2, 1)
 
-                # 1) Nodewise loss => shape [N, F]
-                loss0_nodewise = criterion_node(out0, p3_0)
-                loss1_nodewise = criterion_node(out1, p3_1)
+                    # 1) Nodewise loss => shape [N, F]
+                    loss0_nodewise = criterion_node(out0, p3_0)
+                    loss1_nodewise = criterion_node(out1, p3_1)
 
-                # 2) Average across features => shape [N]
-                loss0_per_node = loss0_nodewise.mean(dim=-1)
-                loss1_per_node = loss1_nodewise.mean(dim=-1)
+                    # 2) Average across features => shape [N]
+                    loss0_per_node = loss0_nodewise.mean(dim=-1)
+                    loss1_per_node = loss1_nodewise.mean(dim=-1)
 
-                loss0_per_graph = loss0_per_node.sum(dim=1)/p3_0.shape[1]
-                loss1_per_graph = loss1_per_node.sum(dim=1)/p3_1.shape[1]
+                    loss0_per_graph = loss0_per_node.sum(dim=1)/p3_0.shape[1]
+                    loss1_per_graph = loss1_per_node.sum(dim=1)/p3_1.shape[1]
 
-                # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
-                #loss0_per_graph = scatter_mean(loss0_per_node, p3_0, dim=0)
-                #loss1_per_graph = scatter_mean(loss1_per_node, p3_1, dim=0)
+                    # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
+                    #loss0_per_graph = scatter_mean(loss0_per_node, p3_0, dim=0)
+                    #loss1_per_graph = scatter_mean(loss1_per_node, p3_1, dim=0)
 
-                # 4) Compute the combined loss for each graph and append to event_losses
-                scores = (loss0_per_graph + loss1_per_graph)  
-                all_scores.extend(scores.cpu().tolist())
-                all_labels.extend(labels.cpu().tolist())
+                    # 4) Compute the combined loss for each graph and append to event_losses
+                    scores = (loss0_per_graph + loss1_per_graph)  
+                    all_scores.extend(scores.cpu().tolist())
+                    all_labels.extend(labels.cpu().tolist())
 
-                # ----- Compute ROC and AUC -----
-                fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
-                auc_val = auc(fpr, tpr)
-
-
-        print(f"Area Under Curve (AUC): {auc_val:.4f}")
-
-        # ----- Plot the ROC curve -----
-        plot_file = os.path.join(self.plot_path, "roc_curve.pdf")
-        plt.figure(figsize=(6, 5))
-        plt.plot(fpr, tpr, label=f'ROC (AUC = {auc_val:.3f})', color='b')
-        plt.plot([0, 1], [0, 1], 'k--')  # diagonal line for "random" classification
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title("ROC Curve")
-        plt.legend(loc="lower right")
-        plt.tight_layout()
-
-        # Save the plot
-        plt.savefig(plot_file, dpi=300)
-        plt.close()
+                    # ----- Compute ROC and AUC -----
+                    fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
+                    auc_val = auc(fpr, tpr)
 
 
-        # ------------------------------------------------
-        # 2) Plot loss distribution by label (normalized)
-        # ------------------------------------------------
-        normal_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 0]
-        anomalous_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 1]
+            print(f"Area Under Curve (AUC): {auc_val:.4f}")
+
+            # ----- Plot the ROC curve -----
+            plot_file = os.path.join(self.plot_path, "roc_curve.pdf")
+            plt.figure(figsize=(6, 5))
+            plt.plot(fpr, tpr, label=f'ROC (AUC = {auc_val:.3f})', color='b')
+            plt.plot([0, 1], [0, 1], 'k--')  # diagonal line for "random" classification
+            plt.xlabel("False Positive Rate")
+            plt.ylabel("True Positive Rate")
+            plt.title("ROC Curve")
+            plt.legend(loc="lower right")
+            plt.tight_layout()
+
+            # Save the plot
+            plt.savefig(plot_file, dpi=300)
+            plt.close()
 
 
-        # Compute the 99th percentile for both distributions
-        p99_normal = np.percentile(normal_scores, 99)
-        p99_anomalous = np.percentile(anomalous_scores, 99)
+            # ------------------------------------------------
+            # 2) Plot loss distribution by label (normalized)
+            # ------------------------------------------------
+            normal_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 0]
+            anomalous_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 1]
 
-        # Determine the x-axis limit (max of the two 95th percentiles)
-        x_max = max(p99_normal, p99_anomalous)
 
-        # Define the bin edges based on [0, x_max]
-        num_bins = 75  # Number of bins
-        bin_edges = np.linspace(0, x_max, num_bins + 1)  # Create bins in the range [0, x_max]
+            # Compute the 99th percentile for both distributions
+            p99_normal = np.percentile(normal_scores, 99)
+            p99_anomalous = np.percentile(anomalous_scores, 99)
 
-        #all_scores_combined = normal_scores + anomalous_scores  # Combine all scores
-        #bin_edges = np.histogram_bin_edges(all_scores_combined, bins=100)  # Compute bin edges
+            # Determine the x-axis limit (max of the two 95th percentiles)
+            x_max = max(p99_normal, p99_anomalous)
 
-        dist_plot_file = os.path.join(self.plot_path, "loss_distribution_of_sig_vs_bkg.pdf")
+            # Define the bin edges based on [0, x_max]
+            num_bins = 75  # Number of bins
+            bin_edges = np.linspace(0, x_max, num_bins + 1)  # Create bins in the range [0, x_max]
 
-        plt.figure(figsize=(6, 5))
-        # density=True => each histogram integrates to 1, letting you compare shapes
-        plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
-        plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+            #all_scores_combined = normal_scores + anomalous_scores  # Combine all scores
+            #bin_edges = np.histogram_bin_edges(all_scores_combined, bins=100)  # Compute bin edges
 
-        plt.xlabel("Loss Score")
-        plt.xlim(0, x_max)
-        plt.ylabel("Density")
-        plt.title("Loss Distribution by Label (Normalized)")
-        plt.legend(loc="upper right")
-        plt.tight_layout()
-        plt.savefig(dist_plot_file, dpi=300)
-        plt.close()
-        print(f"Saved loss distribution plot to: {dist_plot_file}")
+            dist_plot_file = os.path.join(self.plot_path, "loss_distribution_of_sig_vs_bkg.pdf")
+
+            plt.figure(figsize=(6, 5))
+            # density=True => each histogram integrates to 1, letting you compare shapes
+            plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
+            plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+
+            plt.xlabel("Loss Score")
+            plt.xlim(0, x_max)
+            plt.ylabel("Density")
+            plt.title("Loss Distribution by Label (Normalized)")
+            plt.legend(loc="upper right")
+            plt.tight_layout()
+            plt.savefig(dist_plot_file, dpi=300)
+            plt.close()
+            print(f"Saved loss distribution plot to: {dist_plot_file}")
+            return auc_val
+        
+        return None

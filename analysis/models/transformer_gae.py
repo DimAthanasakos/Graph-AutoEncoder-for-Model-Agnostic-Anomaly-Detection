@@ -182,7 +182,7 @@ class SequenceTrimmer(nn.Module):
                     maxlen = torch.quantile(mask.type_as(x).sum(dim=-1), q).long() # maxlen is always 139 since we dont provide a mask
                     #print(f"maxlen = {maxlen}")
                     rand = torch.rand_like(mask.type_as(x))
-                    rand.masked_fill_(~mask, -1)
+                    rand = rand.masked_fill(~mask, -1)
                     #print(f"rand.shape = {rand.shape}")
                     #print(f"rand = {rand}")
                     perm = rand.argsort(dim=-1, descending=True)  # (N, 1, P). This returns the indices that would sort the rand tensor 
@@ -218,7 +218,7 @@ class Embed(nn.Module):
     def __init__(self, input_dim, dims, normalize_input=True, activation='gelu'):
         super().__init__()
 
-        self.input_bn = nn.SyncBatchNorm(input_dim) if normalize_input else None
+        self.input_bn = nn.BatchNorm1d(input_dim) if normalize_input else None
         module_list = []
         starting_dim = input_dim
         for index, dim in enumerate(dims):
@@ -235,7 +235,7 @@ class Embed(nn.Module):
         
         if self.input_bn is not None:
             # x: (batch, embed_dim, seq_len)
-            x = self.input_bn(x)
+            #x = self.input_bn(x)
             x = x.permute(2, 0, 1).contiguous()
         # x: (seq_len, batch, embed_dim)
 
@@ -332,7 +332,10 @@ class PairEmbed(nn.Module):
                     x = self.pairwise_lv_fts(x.unsqueeze(-1), x.unsqueeze(-2))
                     if self.remove_self_pair:
                         i = torch.arange(0, seq_len, device=x.device)
-                        x[:, :, i, i] = 0
+                        x_new = x.clone()
+                        x_new[:, :, i, i] = 0
+                        x = x_new 
+                        #x[:, :, i, i] = 0
                     x = x.view(-1, self.pairwise_lv_dim, seq_len * seq_len)
                 if uu is not None:
                     uu = uu.view(-1, self.pairwise_input_dim, seq_len * seq_len)
@@ -430,7 +433,8 @@ class Block(nn.Module):
         if self.post_attn_norm is not None:
             x = self.post_attn_norm(x)
         x = self.dropout(x)
-        x += residual
+        #x += residual
+        x = x + residual
 
         residual = x
         x = self.pre_fc_norm(x)
@@ -442,7 +446,8 @@ class Block(nn.Module):
         x = self.dropout(x)
         if self.w_resid is not None:
             residual = torch.mul(self.w_resid, residual)
-        x += residual
+        #x += residual
+        x = x + residual
 
         return x
 
@@ -459,8 +464,8 @@ class Encoder(nn.Module):
                  embed_dims=[128, 512, 128],   # the MLP for transforming the particle features input 
                  pair_embed_dims=[64, 64, 64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
                                                # one more layers to this to match the number of heads in the attention layer.
-                 num_heads=2,  # how many attention heads in each particle attention block
-                 num_layers=2, # how many particle attention blocks
+                 num_heads=4,  # how many attention heads in each particle attention block
+                 num_layers=4, # how many particle attention blocks
                  block_params=None,
                  activation='gelu',
                  # misc
@@ -551,8 +556,8 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, 
                  embed_dims=[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
-                 num_heads=2,  # how many attention heads in each particle attention block
-                 num_layers=2, # how many particle attention blocks
+                 num_heads=4,  # how many attention heads in each particle attention block
+                 num_layers=4, # how many particle attention blocks
                  activation='gelu',
                  use_amp=False,
                  **kwargs):
