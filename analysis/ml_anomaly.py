@@ -33,13 +33,14 @@ import random
 
 
 class anomaly():
-    def __init__(self, model, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plotstest4') -> None:
+    def __init__(self, model, model_info, plot=True, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_test') -> None:
         self.model_info = model_info
         self.path = model_info['path_SR'] # path to the data (pyg dataset)
         self.ddp = model_info['ddp']
         self.torch_device = model_info['torch_device']
         self.rank = 0
         self.plot_path = plot_path
+        self.plot = plot 
         if not os.path.exists(plot_path):
             os.makedirs(plot_path)
             
@@ -63,7 +64,7 @@ class anomaly():
         dataset = torch.load(self.path)
 
         random.Random(0).shuffle(dataset)
-        print(f'Loaded testing (SR) dataset with {len(dataset)} samples')
+        #print(f'Loaded testing (SR) dataset with {len(dataset)} samples')
         dataset = dataset[:self.n_bkg + self.n_sig]
         dataset = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
         return dataset
@@ -115,57 +116,62 @@ class anomaly():
 
         
         print(f"Area Under Curve (AUC): {auc_val:.4f}")
+        if self.plot:
+            # ----- Plot the ROC curve -----
+            plot_file = os.path.join(self.plot_path, "roc_curve.pdf")
+            plt.figure(figsize=(6, 5))
+            plt.plot(fpr, tpr, label=f'ROC (AUC = {auc_val:.3f})', color='b')
+            plt.plot([0, 1], [0, 1], 'k--')  # diagonal line for "random" classification
+            plt.xlabel("False Positive Rate")
+            plt.ylabel("True Positive Rate")
+            plt.title("ROC Curve")
+            # Add grid lines every 0.1
+            plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
+            plt.xticks(np.arange(0, 1.1, 0.1))  # X-axis grid at 0.1 intervals
+            plt.yticks(np.arange(0, 1.1, 0.1))  # Y-axis grid at 0.1 intervals
+            plt.legend(loc="lower right")
+            plt.tight_layout()
 
-        # ----- Plot the ROC curve -----
-        plot_file = os.path.join(self.plot_path, "roc_curve.pdf")
-        plt.figure(figsize=(6, 5))
-        plt.plot(fpr, tpr, label=f'ROC (AUC = {auc_val:.3f})', color='b')
-        plt.plot([0, 1], [0, 1], 'k--')  # diagonal line for "random" classification
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title("ROC Curve")
-        plt.legend(loc="lower right")
-        plt.tight_layout()
-
-        # Save the plot
-        plt.savefig(plot_file, dpi=300)
-        plt.close()
-
-
-        # ------------------------------------------------
-        # 2) Plot loss distribution by label (normalized)
-        # ------------------------------------------------
-        normal_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 0]
-        anomalous_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 1]
+            # Save the plot
+            plt.savefig(plot_file, dpi=300)
+            plt.close()
 
 
-        # Compute the 99th percentile for both distributions
-        p99_normal = np.percentile(normal_scores, 99)
-        p99_anomalous = np.percentile(anomalous_scores, 99)
+            # ------------------------------------------------
+            # 2) Plot loss distribution by label (normalized)
+            # ------------------------------------------------
+            normal_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 0]
+            anomalous_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 1]
 
-        # Determine the x-axis limit (max of the two 95th percentiles)
-        x_max = max(p99_normal, p99_anomalous)
 
-        # Define the bin edges based on [0, x_max]
-        num_bins = 75  # Number of bins
-        bin_edges = np.linspace(0, x_max, num_bins + 1)  # Create bins in the range [0, x_max]
+            # Compute the 99th percentile for both distributions
+            p99_normal = np.percentile(normal_scores, 99)
+            p99_anomalous = np.percentile(anomalous_scores, 99)
 
-        #all_scores_combined = normal_scores + anomalous_scores  # Combine all scores
-        #bin_edges = np.histogram_bin_edges(all_scores_combined, bins=100)  # Compute bin edges
+            # Determine the x-axis limit (max of the two 95th percentiles)
+            x_max = max(p99_normal, p99_anomalous)
 
-        dist_plot_file = os.path.join(self.plot_path, "loss_distribution_of_sig_vs_bkg.pdf")
+            # Define the bin edges based on [0, x_max]
+            num_bins = 75  # Number of bins
+            bin_edges = np.linspace(0, x_max, num_bins + 1)  # Create bins in the range [0, x_max]
 
-        plt.figure(figsize=(6, 5))
-        # density=True => each histogram integrates to 1, letting you compare shapes
-        plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
-        plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+            #all_scores_combined = normal_scores + anomalous_scores  # Combine all scores
+            #bin_edges = np.histogram_bin_edges(all_scores_combined, bins=100)  # Compute bin edges
 
-        plt.xlabel("Loss Score")
-        plt.xlim(0, x_max)
-        plt.ylabel("Density")
-        plt.title("Loss Distribution by Label (Normalized)")
-        plt.legend(loc="upper right")
-        plt.tight_layout()
-        plt.savefig(dist_plot_file, dpi=300)
-        plt.close()
-        print(f"Saved loss distribution plot to: {dist_plot_file}")
+            dist_plot_file = os.path.join(self.plot_path, "loss_distribution_of_sig_vs_bkg.pdf")
+
+            plt.figure(figsize=(6, 5))
+            # density=True => each histogram integrates to 1, letting you compare shapes
+            plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
+            plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+
+            plt.xlabel("Loss Score")
+            plt.xlim(0, x_max)
+            plt.ylabel("Density")
+            plt.title("Loss Distribution by Label (Normalized)")
+            plt.legend(loc="upper right")
+            plt.grid()
+            plt.tight_layout()
+            plt.savefig(dist_plot_file, dpi=300)
+            plt.close()
+            print(f"Saved loss distribution plot to: {dist_plot_file}")

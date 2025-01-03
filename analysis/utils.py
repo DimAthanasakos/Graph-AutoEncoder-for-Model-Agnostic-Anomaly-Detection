@@ -56,42 +56,56 @@ def SaveJson(save_file,data):
         json.dump(data, f)
 
 
-def _preprocessing(particles,jets,mjj,save_json=False, norm = 'mean'):
+def _preprocessing(particles,jets,mjj,save_json=True, norm = 'mean'):
     n_part = particles.shape[2]
     batch_size = particles.shape[0]
 
-    return particles.astype(np.float32), jets.astype(np.float32) # the data is already preprocessed and normalized in the dataset
+    #return particles.astype(np.float32), jets.astype(np.float32) # the data is already preprocessed and normalized in the dataset
+    if False:
+        print(f'particles.shape: {particles.shape}')
+        for ps in particles:
+            print(f'ps.shape: {ps.shape}')
+            for p in ps:
+                print(f'p[:10]: {p[:10]}')
+                msk = p[:,0]>0 # mask for non-zero padded particles
+                yphi_avg = np.average(p[msk,1:3], weights=p[msk,0], axis=0)
+                p[msk,1:3] -= yphi_avg       # centralize phi and eta
+                p[msk,0] /= np.sum(p[msk,0]) # normalize pt
+                print(f'p[:10]: {p[:10]}')
+                print()
+            time.sleep(2.5)
+        return particles.astype(np.float32), jets.astype(np.float32)
 
-    for ps in particles:
-        print(f'ps.shape: {ps.shape}')
-        for p in ps:
-            print(f'p[:20]: {p[:20]}')
-            msk = p[:,0]>0 # mask for non-zero padded particles
-            yphi_avg = np.average(p[msk,1:3], weights=p[msk,0], axis=0)
-            p[msk,1:3] -= yphi_avg       # centralize phi and eta
-            p[msk,0] /= np.sum(p[msk,0]) # normalize pt
-            print(f'p[:20]: {p[:20]}')
-            print()
-        time.sleep(0.5)
-    return particles.astype(np.float32), jets.astype(np.float32)
+    #jets[:,:,0] = jets[:,:,0]/np.expand_dims(mjj,-1)
+    #jets[:,:,3] = jets[:,:,3]/np.expand_dims(mjj,-1)
+    
 
-    jets[:,:,0] = jets[:,:,0]/np.expand_dims(mjj,-1)
-    jets[:,:,3] = jets[:,:,3]/np.expand_dims(mjj,-1)
-        
+    print(f'preprocessing')
+    print(f'particles.shape: {particles.shape}')
+    print(f'particles[0, :, :15, :5]:')
+    print(particles[0, :, :15, :5])
+    print()
+    
     particles=particles.reshape(-1,particles.shape[-1]) #flatten
-    jets=jets.reshape(-1,jets.shape[-1]) #flatten
-
-        
+    #jets=jets.reshape(-1,jets.shape[-1]) #flatten
+   
     #Transformations
     particles[:,0] = np.ma.log(1.0 - particles[:,0]).filled(0)
-    jets[:,0] = np.log(jets[:,0])
-    jets[:,3] = np.ma.log(jets[:,3]).filled(0)
+    #jets[:,0] = np.log(jets[:,0])
+    #jets[:,3] = np.ma.log(jets[:,3]).filled(0)
 
-        
+    #print(f'particles[:5, :5]:')
+    #print(particles[:5, :5])
+    #print()
+    
     if save_json:
         mask = particles[:,-1]
         mean_particle = np.average(particles[:,:-1],axis=0,weights=mask)
         std_particle = np.sqrt(np.average((particles[:,:-1] - mean_particle)**2,axis=0,weights=mask))
+        print(f'===============================')
+        print(f'mean_particle: {mean_particle}')
+        print(f'std_particle: {std_particle}')
+        print(f'===============================')
         data_dict = {
                 'max_jet':np.max(jets,0).tolist(),
                 'min_jet':np.min(jets,0).tolist(),
@@ -108,15 +122,22 @@ def _preprocessing(particles,jets,mjj,save_json=False, norm = 'mean'):
 
             
     if norm == 'mean':
-        jets = np.ma.divide(jets-data_dict['mean_jet'],data_dict['std_jet']).filled(0)
+        #jets = np.ma.divide(jets-data_dict['mean_jet'],data_dict['std_jet']).filled(0)
         particles[:,:-1]= np.ma.divide(particles[:,:-1]-data_dict['mean_particle'],data_dict['std_particle']).filled(0)
     elif norm == 'min':
-        jets = np.ma.divide(jets-data_dict['min_jet'],np.array(data_dict['max_jet']) -data_dict['min_jet']).filled(0)
+        #jets = np.ma.divide(jets-data_dict['min_jet'],np.array(data_dict['max_jet']) -data_dict['min_jet']).filled(0)
         particles[:,:-1]= np.ma.divide(particles[:,:-1]-data_dict['min_particle'],np.array(data_dict['max_particle']) - data_dict['min_particle']).filled(0)            
     else:
         print("ERROR: give a normalization method!")
     particles = particles.reshape(batch_size,2,n_part,-1)
-    jets = jets.reshape(batch_size,2,-1)
+    #jets = jets.reshape(batch_size,2,-1)
+
+    print(f'particles.shape: {particles.shape}')
+    print(f'particles[0, :, :15, :5]: ') 
+    print(particles[0, :, :15, :5])
+    print()
+    print()
+
     return particles.astype(np.float32),jets.astype(np.float32)
 
 
@@ -210,9 +231,9 @@ def DataLoader(n_events,
 
     with h5.File(os.path.join(data_path,file_name),"r") as h5f:
         nevts = min(n_events, h5f['jet_data'][:].shape[0])          # number of events
-        particles = h5f['constituents'][:nevts, :, :n_part, :]          # particles
-        jets = h5f['jet_data'][:nevts, :, :n_part]
-        mask = h5f['mask'][:nevts, :, :n_part]
+        particles = h5f['constituents'][:, :, :n_part, :]          # particles
+        jets = h5f['jet_data'][:, :, :n_part]
+        mask = h5f['mask'][:, :, :n_part]
         particles = np.concatenate([particles,mask],-1)
 
     # print the analytics of the data
@@ -284,14 +305,14 @@ def DataLoader(n_events,
     #particles, jets = _preprocessing(particles, jets, mjj)
     #mjj = prep_mjj(mjj, mjjmin, mjjmax)
 
-    return particles, jets, mjj
+    return particles[:nevts], jets[:nevts], mjj[:nevts]
 
 
 
 #---------------------------------------------------------------
 # Construct graphs from input_data and write them to file
 #---------------------------------------------------------------
-def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=250000, n_part=100):
+def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=40000, n_part=100):
     '''
     Construct graphs:
       - Particle graphs are constructed from energyflow dataset

@@ -845,7 +845,7 @@ def to_ptrapphim(x, eps=1e-8):
 class ParT():
     
     #---------------------------------------------------------------
-    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots/plots_test_tae'):
+    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plots_test'):
         '''
         :param model_info: Dictionary of model info, containing the following keys:
                                 'model_settings': dictionary of model settings
@@ -944,7 +944,8 @@ class ParT():
 
 
         self.train_loader, self.val_loader, self.test_loader = self.init_tr_data()
-        self.cl_loader = self.init_cl_data()
+        if self.local_rank == 0: # only need to run the classification in the end in one gpu since its one pass through the data
+            self.cl_loader = self.init_cl_data()
 
         self.model = self.init_model()
 
@@ -963,13 +964,13 @@ class ParT():
         
     
         # Change the order of the features from (pt, eta, phi, pid) to (px, py, pz, E) to agree with the architecture.ParticleTransformer script
-        X_ParT = energyflow.p4s_from_ptyphims(X_ParT)
+        #X_ParT = energyflow.p4s_from_ptyphims(X_ParT)
 
         # (E, px, py, pz) -> (px, py, pz, E)
-        X_ParT[:,:,:, [0, 1, 2, 3]] = X_ParT[:,:, :, [1, 2, 3, 0]] 
+        #X_ParT[:,:,:, [0, 1, 2, 3]] = X_ParT[:,:, :, [1, 2, 3, 0]] 
             
-        # Transpose the data to match the ParticleNet/ParT architecture convention which is (batch_size, n_features, n_particles) 
-        # instead of the current shape (batch_size, n_particles, n_features)
+        # Transpose the data to match the ParticleNet/ParT architecture convention which is (batch_size, 2, n_features, n_particles) 
+        # instead of the current shape (batch_size, 2, n_particles, n_features)
         X_ParT = np.transpose(X_ParT, (0, 1, 3, 2))
             
         if self.graph_transformer:
@@ -1001,7 +1002,8 @@ class ParT():
             self.X_ParT, self.Y_ParT = self.load_particles(use_SR=False)
 
             print(f'X_ParT.shape: {self.X_ParT.shape}')
-
+            print(f'self.X_ParT[0, :, :5, :]: {self.X_ParT[0, :, :5, :]}')
+            print()
             # Delete the last-column (pid or masses or E) of the particles
             self.X_ParT = self.X_ParT[:,:,:,:3]
             
@@ -1011,13 +1013,15 @@ class ParT():
             # TODO:
                 
             # Change the order of the features from (pt, eta, phi, pid) to (px, py, pz, E) to agree with the architecture.ParticleTransformer script
-            self.X_ParT = energyflow.p4s_from_ptyphims(self.X_ParT)
-
+            #self.X_ParT = energyflow.p4s_from_ptyphims(self.X_ParT)
+            #print(f'self.X_ParT[0, :, :5, :]: {self.X_ParT[0, :, :5, :]}')
+            #print()
             # (E, px, py, pz) -> (px, py, pz, E)
-            self.X_ParT[:,:,:, [0, 1, 2, 3]] = self.X_ParT[:,:, :, [1, 2, 3, 0]] 
-            
-            # Transpose the data to match the ParticleNet/ParT architecture convention which is (batch_size, n_features, n_particles) 
-            # instead of the current shape (batch_size, n_particles, n_features)
+            #self.X_ParT[:,:,:, [0, 1, 2, 3]] = self.X_ParT[:,:, :, [1, 2, 3, 0]] 
+            #print(f'self.X_ParT[0, :, :5, :]: {self.X_ParT[0, :, :5, :]}')
+            #print()
+            # Transpose the data to match the ParticleNet/ParT architecture convention which is (batch_size, 2, n_features, n_particles) 
+            # instead of the current shape (batch_size, 2, n_particles, n_features)
             self.X_ParT = np.transpose(self.X_ParT, (0, 1, 3, 2))
 
             if self.graph_transformer:
@@ -1025,7 +1029,6 @@ class ParT():
             else:   
                 features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test = self.load_data(self.X_ParT, self.Y_ParT, graph_transformer = self.graph_transformer, sorting_key = self.sorting_key)
                 graph_train, graph_val, graph_test = (None,) * 3
-
         
         else: # Initialize the data loaders for all but the main process (rank 0)
             features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test, graph_train, graph_val, graph_test = (None,) * 9
@@ -1108,10 +1111,10 @@ class ParT():
             train_loader = torch.utils.data.DataLoader(train_dataset, batch_size = self.batch_size, sampler = self.train_sampler, num_workers = 4)
 
             val_dataset = torch.utils.data.TensorDataset(torch.from_numpy(features_val).float(), torch.from_numpy(Y_ParT_val).long())
-            val_loader = torch.utils.data.DataLoader(val_dataset, batch_size = self.batch_size, num_workers = 4)
+            val_loader = torch.utils.data.DataLoader(val_dataset, batch_size = self.batch_size, num_workers = 4, shuffle=True)
             
             test_dataset = torch.utils.data.TensorDataset(torch.from_numpy(features_test).float(), torch.from_numpy(Y_ParT_test).long()) 
-            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size = self.batch_size, num_workers = 4)
+            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size = self.batch_size, num_workers = 4, shuffle=True)
 
         return train_loader, val_loader, test_loader
     
@@ -1200,13 +1203,11 @@ class ParT():
        
         # For the case of Vanilla Particle Transformer
         else: 
+            Y = np.array(Y) # cause we've defined Y as a python list
             if not train: # classification
-                Y = np.array(Y)
                 return X, Y
             
-            Y = np.array(Y) # cause we've defined Y as a python list
-            (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test) = energyflow.utils.data_split(X, Y,
-                                                                                                                               val=self.n_val, test=self.n_test)
+            (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test) = energyflow.utils.data_split(X, Y, val=self.n_val, test=self.n_test)
             return (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test)
         
     #---------------------------------------------------------------
@@ -1255,17 +1256,19 @@ class ParT():
         if self.set_ddp:
             torch.cuda.set_device(self.local_rank)
             self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model) # SyncBatchNorm for DDP, else it will throw an error due to inplace operations in encoder-decoder
-            self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
+            self.model = DDP(self.model, device_ids=[self.local_rank],) #find_unused_parameters=True)
                 
         torch.autograd.set_detect_anomaly(True)
         for epoch in range(1, self.epochs+1):
             if self.set_ddp: self.train_sampler.set_epoch(epoch)  
 
             t_start = time.time()
-            loss_train = self._train_part()
+            loss_train = self._train_part(epoch)
             loss_test = self._test_part(self.test_loader,)
             loss_val = self._test_part(self.val_loader, )
-            
+            #f_loss_train = self._test_part(self.train_loader, )
+            if self.local_rank == 0 and epoch%1==0:
+                self.run_anomaly(plot=False)
             
             if self.local_rank == 0:
                 # Save the model with the best test AUC
@@ -1274,8 +1277,9 @@ class ParT():
                     torch.save(self.model.state_dict(), best_model_path)
 
                 print("--------------------------------")
-                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.6f}, Time: {time.time() - t_start:.1f} sec')
-        
+                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.5f}, Time: {time.time() - t_start:.1f} sec')
+            self.scheduler.step(loss_val)
+
         # lets plot the loss distribution of the test set
         if self.local_rank == 0:            
             print(f'--------------------------------')
@@ -1283,6 +1287,9 @@ class ParT():
             print()
             self._plot_loss()
 
+        # Synchronize all processes before loading the model
+        if self.set_ddp:
+            dist.barrier()  # Ensures all processes finish training before proceeding
 
         # Load the best model before returning
         self.model.load_state_dict(torch.load(best_model_path))  # Load best model's state_dict
@@ -1299,10 +1306,10 @@ class ParT():
 
         
     #---------------------------------------------------------------
-    def _train_part(self):
+    def _train_part(self, ep=-1):
 
 
-        self.model.train()             # Set model to training mode. This is necessary for dropout, batchnorm etc layers 
+        self.model.train()        # Set model to training mode. This is necessary for dropout, batchnorm etc layers 
                                   # that behave differently in training mode vs eval mode (which is the default)
                                   # We need to include this since we have particlenet.eval() in the test_particlenet function
         
@@ -1322,8 +1329,11 @@ class ParT():
             # zero the parameter gradients
             self.optimizer.zero_grad()
 
-            p3_0 = to_ptrapphim(jet0)
-            p3_1 = to_ptrapphim(jet1)
+            #p3_0 = to_ptrapphim(jet0)
+            #p3_1 = to_ptrapphim(jet1)
+            p3_0 = jet0 
+            p3_1 = jet1
+            
             if self.input_dim == 1:
                 # create pt of each particle instead of (px, py, pz, E) for the input 
                 x0 = p3_0[:, 0, :].unsqueeze(1)
@@ -1335,21 +1345,53 @@ class ParT():
 
             else:
                 x0, x1 = jet0, jet1
-
+            #print(f'x0.shape: {x0.shape}')
+            #print(f'jet0.shape: {jet0.shape}')
+            #print(f'p3_0.shape: {p3_0.shape}')
             # forward + backward + optimize
-            out0 = self.model(x = x0, v = jet0, graph = graph)
+
+            out0 = self.model(x = x0, v = jet0, graph = graph,) # pr=True if index==0 else False)
             out1 = self.model(x = x1, v = jet1, graph = graph)
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
-
-            loss0 = self.criterion(out0, p3_0) * 100 
-            loss1 = self.criterion(out1, p3_1) * 100 
+            jet0 = jet0.permute(0, 2, 1)
+            jet1 = jet1.permute(0, 2, 1)
+                            
+            loss0 = self.criterion(out0, p3_0) * 100
+            loss1 = self.criterion(out1, p3_1) * 100
             loss = loss0 + loss1
+            #if self.local_rank == 0:
+            #    print(f'Index: {index}, loss: {loss.item()}')
             loss.backward()
             self.optimizer.step()
 
             loss_cum += loss.item()*length
             count += length
+
+            if index == 0 and self.local_rank == 0 and ep%1==0:
+                # Avoid division by zero: Create a mask where p3_0 is non-zero
+                residual = p3_0 - out0  
+                nonzero_mask = (p3_0 != 0)
+
+                # Scale the residual by p3_0 where nonzero, else set it to 0
+                scaled_residual = torch.zeros_like(residual)
+                scaled_residual[nonzero_mask] = residual[nonzero_mask] / p3_0[nonzero_mask]
+
+
+                print(f'===============')
+                print(f'jet0[0, :5, :5]: {jet0[0, :5, :5]}')
+                print(f'p3_0[0, :5, :5]: {p3_0[0, :5, :5]}')
+                print()
+                print(f'jet1[0, :5, :5]: {jet1[0, :5, :5]}')
+                print(f'p3_1[0, :5, :]: {p3_1[0, :5, :5]}')
+
+                
+                print(f'out0[:2, :5, :]: {out0[:2, :5, :]}')
+                print()
+                print(f'===============')
+                print()
+                
+
             # Cache management
             torch.cuda.empty_cache()
             
@@ -1377,8 +1419,10 @@ class ParT():
             # zero the parameter gradients
             self.optimizer.zero_grad()
 
-            p3_0 = to_ptrapphim(jet0)
-            p3_1 = to_ptrapphim(jet1)
+            #p3_0 = to_ptrapphim(jet0)
+            #p3_1 = to_ptrapphim(jet1)
+            p3_0 = jet0 
+            p3_1 = jet1
             if self.input_dim == 1:
                 # create pt of each particle instead of (px, py, pz, E) for the input 
                 x0 = p3_0[:, 0, :].unsqueeze(1)
@@ -1391,13 +1435,13 @@ class ParT():
             else:
                 x0, x1 = jet0, jet1
 
-            out0 = self.model(x = x0, v = jet0, graph = graph)
-            out1 = self.model(x = x1, v = jet1, graph = graph)
+            out0 = self.model(x = x0, v = jet0, graph = graph) 
+            out1 = self.model(x = x1, v = jet1, graph = graph) 
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
             
-            loss0 = self.criterion(out0, p3_0) * 100 
-            loss1 = self.criterion(out1, p3_1) * 100 
+            loss0 = self.criterion(out0, p3_0)  * 100
+            loss1 = self.criterion(out1, p3_1)  * 100
             loss = loss0 + loss1
 
             loss_cum += loss.item()*length
@@ -1429,8 +1473,10 @@ class ParT():
                 # zero the parameter gradients
                 self.optimizer.zero_grad()
 
-                p3_0 = to_ptrapphim(jet0)
-                p3_1 = to_ptrapphim(jet1)
+                #p3_0 = to_ptrapphim(jet0)
+                #p3_1 = to_ptrapphim(jet1)
+                p3_0 = jet0 
+                p3_1 = jet1
                 if self.input_dim == 1:
                     # create pt of each particle instead of (px, py, pz, E) for the input 
                     x0 = p3_0[:, 0, :].unsqueeze(1)
@@ -1444,17 +1490,17 @@ class ParT():
                     x0, x1 = jet0, jet1
 
                 out0 = self.model(x = x0, v = jet0, graph = graph)
-                out1 = self.model(x = x1, v = jet1, graph = graph)
+                out1 = self.model(x = x1, v = jet1, graph = graph) 
                 p3_0 = p3_0.permute(0, 2, 1)
                 p3_1 = p3_1.permute(0, 2, 1)
 
                 # 1) Nodewise loss => shape [N, F]
-                loss0_nodewise = criterion_node(out0, p3_0) * 100 
-                loss1_nodewise = criterion_node(out1, p3_1) * 100 
+                loss0_nodewise = criterion_node(out0, p3_0)  * 100
+                loss1_nodewise = criterion_node(out1, p3_1)  * 100
 
                 # 2) Average across features => shape [N]
                 loss0_per_node = loss0_nodewise.mean(dim=-1)
-                loss1_per_node = loss1_nodewise.mean(dim=-1)
+                loss1_per_node = loss1_nodewise.mean(dim=-1) 
 
                 loss0_per_graph = loss0_per_node.sum(dim=1)/p3_0.shape[1]
                 loss1_per_graph = loss1_per_node.sum(dim=1)/p3_1.shape[1]
@@ -1496,6 +1542,7 @@ class ParT():
         plt.ylabel('Counts')
         plt.title('Comparison of Two Loss Distributions')
         plt.legend()
+        plt.grid()
         plt.tight_layout()
 
         plt.savefig(plot_file, dpi=300)
@@ -1510,7 +1557,7 @@ class ParT():
 
 
     #---------------------------------------------------------------
-    def run_anomaly(self):
+    def run_anomaly(self, plot = True):
         if self.local_rank == 0:
             self.model.eval()
             # A nodewise criterion
@@ -1546,15 +1593,15 @@ class ParT():
 
                     else:
                         x0, x1 = jet0, jet1
-
-                    out0 = self.model(x = x0, v = jet0, graph = graph)
-                    out1 = self.model(x = x1, v = jet1, graph = graph)
+ 
+                    out0 = self.model(x = x0, v = jet0, graph = graph)  
+                    out1 = self.model(x = x1, v = jet1, graph = graph) 
                     p3_0 = p3_0.permute(0, 2, 1)
                     p3_1 = p3_1.permute(0, 2, 1)
 
                     # 1) Nodewise loss => shape [N, F]
-                    loss0_nodewise = criterion_node(out0, p3_0)
-                    loss1_nodewise = criterion_node(out1, p3_1)
+                    loss0_nodewise = criterion_node(out0, p3_0) * 100
+                    loss1_nodewise = criterion_node(out1, p3_1) * 100
 
                     # 2) Average across features => shape [N]
                     loss0_per_node = loss0_nodewise.mean(dim=-1)
@@ -1578,60 +1625,65 @@ class ParT():
 
 
             print(f"Area Under Curve (AUC): {auc_val:.4f}")
+            if plot:
+                # ----- Plot the ROC curve -----
+                plot_file = os.path.join(self.plot_path, "roc_curve.pdf")
+                plt.figure(figsize=(6, 5))
+                plt.plot(fpr, tpr, label=f'ROC (AUC = {auc_val:.3f})', color='b')
+                plt.plot([0, 1], [0, 1], 'k--')  # diagonal line for "random" classification
+                plt.xlabel("False Positive Rate")
+                plt.ylabel("True Positive Rate")
+                plt.title("ROC Curve")
+                plt.legend(loc="lower right")
+                # Add grid lines every 0.1
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
+                plt.xticks(np.arange(0, 1.1, 0.1))  # X-axis grid at 0.1 intervals
+                plt.yticks(np.arange(0, 1.1, 0.1))  # Y-axis grid at 0.1 intervals
+                plt.tight_layout()
 
-            # ----- Plot the ROC curve -----
-            plot_file = os.path.join(self.plot_path, "roc_curve.pdf")
-            plt.figure(figsize=(6, 5))
-            plt.plot(fpr, tpr, label=f'ROC (AUC = {auc_val:.3f})', color='b')
-            plt.plot([0, 1], [0, 1], 'k--')  # diagonal line for "random" classification
-            plt.xlabel("False Positive Rate")
-            plt.ylabel("True Positive Rate")
-            plt.title("ROC Curve")
-            plt.legend(loc="lower right")
-            plt.tight_layout()
-
-            # Save the plot
-            plt.savefig(plot_file, dpi=300)
-            plt.close()
-
-
-            # ------------------------------------------------
-            # 2) Plot loss distribution by label (normalized)
-            # ------------------------------------------------
-            normal_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 0]
-            anomalous_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 1]
+                # Save the plot
+                plt.savefig(plot_file, dpi=300)
+                plt.close()
 
 
-            # Compute the 99th percentile for both distributions
-            p99_normal = np.percentile(normal_scores, 99)
-            p99_anomalous = np.percentile(anomalous_scores, 99)
+                # ------------------------------------------------
+                # 2) Plot loss distribution by label (normalized)
+                # ------------------------------------------------
+                normal_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 0]
+                anomalous_scores = [s for s, lbl in zip(all_scores, all_labels) if lbl == 1]
 
-            # Determine the x-axis limit (max of the two 95th percentiles)
-            x_max = max(p99_normal, p99_anomalous)
 
-            # Define the bin edges based on [0, x_max]
-            num_bins = 75  # Number of bins
-            bin_edges = np.linspace(0, x_max, num_bins + 1)  # Create bins in the range [0, x_max]
+                # Compute the 99th percentile for both distributions
+                p99_normal = np.percentile(normal_scores, 99)
+                p99_anomalous = np.percentile(anomalous_scores, 99)
 
-            #all_scores_combined = normal_scores + anomalous_scores  # Combine all scores
-            #bin_edges = np.histogram_bin_edges(all_scores_combined, bins=100)  # Compute bin edges
+                # Determine the x-axis limit (max of the two 95th percentiles)
+                x_max = max(p99_normal, p99_anomalous)
 
-            dist_plot_file = os.path.join(self.plot_path, "loss_distribution_of_sig_vs_bkg.pdf")
+                # Define the bin edges based on [0, x_max]
+                num_bins = 75  # Number of bins
+                bin_edges = np.linspace(0, x_max, num_bins + 1)  # Create bins in the range [0, x_max]
 
-            plt.figure(figsize=(6, 5))
-            # density=True => each histogram integrates to 1, letting you compare shapes
-            plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
-            plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+                #all_scores_combined = normal_scores + anomalous_scores  # Combine all scores
+                #bin_edges = np.histogram_bin_edges(all_scores_combined, bins=100)  # Compute bin edges
 
-            plt.xlabel("Loss Score")
-            plt.xlim(0, x_max)
-            plt.ylabel("Density")
-            plt.title("Loss Distribution by Label (Normalized)")
-            plt.legend(loc="upper right")
-            plt.tight_layout()
-            plt.savefig(dist_plot_file, dpi=300)
-            plt.close()
-            print(f"Saved loss distribution plot to: {dist_plot_file}")
-            return auc_val
-        
+                dist_plot_file = os.path.join(self.plot_path, "loss_distribution_of_sig_vs_bkg.pdf")
+
+                plt.figure(figsize=(6, 5))
+                # density=True => each histogram integrates to 1, letting you compare shapes
+                plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
+                plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+
+                plt.xlabel("Loss Score")
+                plt.xlim(0, x_max)
+                plt.ylabel("Density")
+                plt.title("Loss Distribution by Label (Normalized)")
+                plt.legend(loc="upper right")
+                plt.grid()
+                plt.tight_layout()
+                plt.savefig(dist_plot_file, dpi=300)
+                plt.close()
+                print(f"Saved loss distribution plot to: {dist_plot_file}")
+                return auc_val
+            
         return None

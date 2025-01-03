@@ -32,6 +32,47 @@ def delta_r2(eta1, phi1, eta2, phi2):
     return (eta1 - eta2)**2 + delta_phi(phi1, phi2)**2
 
 
+def p4s_from_ptyphims(ptyphims):
+    """
+    Calculate Cartesian four-vectors from transverse momenta (pt),
+    rapidities (y), azimuthal angles (phi), and (optionally) masses (m).
+
+    Arguments:
+        ptyphims : torch.Tensor or array-like
+          A shape (...,3) or (...,4) tensor storing [pt, y, phi, (m)].
+
+    Returns:
+        torch.Tensor
+          An array (...,4) of Cartesian four-vectors [E, px, py, pz].
+    """
+    # Convert input to a torch Tensor of float type
+    ptyphims = torch.as_tensor(ptyphims, dtype=torch.float)
+
+    # Slice out pt, y, phi
+    pts  = ptyphims[..., 0:1]  # (...,1)
+    ys   = ptyphims[..., 1:2]  # (...,1)
+    phis = ptyphims[..., 2:3]  # (...,1)
+
+    # If a mass is present, slice that out; otherwise fill with zeros
+    if ptyphims.shape[-1] == 4:
+        ms = ptyphims[..., 3:4]
+    else:
+        ms = torch.zeros_like(pts)
+
+    # Compute transverse energy
+    Ets = torch.sqrt(pts**2 + ms**2)
+
+    # Build the four-vector: [E, px, py, pz]
+    p4s = torch.cat([
+        Ets * torch.cosh(ys),   # E
+        pts * torch.cos(phis),  # px
+        pts * torch.sin(phis),  # py
+        Ets * torch.sinh(ys),   # pz
+    ], dim=-1)
+
+    return p4s
+
+
 def to_pt2(x, eps=1e-8):
     pt2 = x[:, :2].square().sum(dim=1, keepdim=True)
     if eps is not None:
@@ -90,8 +131,14 @@ def p3_norm(p, eps=1e-8):
 # Our datasets by default produce [pt, eta, phi] so currently we do the redundant transformation: [pt, eta, phi] -> [px, py, pz, E] in models.ParticleTransformer 
 # and then -> [pt, eta, phi] here: 
 def pairwise_lv_fts(xi, xj, num_outputs=4, eps=1e-8):
-    pti, rapi, phii = to_ptrapphim(xi, False, eps=None).split((1, 1, 1), dim=1)
-    ptj, rapj, phij = to_ptrapphim(xj, False, eps=None).split((1, 1, 1), dim=1)
+    #pti, rapi, phii = to_ptrapphim(xi, False, eps=None).split((1, 1, 1), dim=1)
+    #ptj, rapj, phij = to_ptrapphim(xj, False, eps=None).split((1, 1, 1), dim=1)
+    
+    pti, rapi, phii = xi.split((1, 1, 1), dim=1)
+    ptj, rapj, phij = xj.split((1, 1, 1), dim=1)
+    #print(f'xi.shape: {xi.shape}')
+    #print(f'xi[0]: {xi[0]}')
+    #print(f'num_outputs: {num_outputs}')
 
     delta = delta_r2(rapi, phii, rapj, phij).sqrt()
     lndelta = torch.log(delta.clamp(min=eps))
@@ -105,8 +152,14 @@ def pairwise_lv_fts(xi, xj, num_outputs=4, eps=1e-8):
         outputs = [lnkt, lnz, lndelta]
 
     if num_outputs > 3:
+        xi = p4s_from_ptyphims(xi)
+        xj = p4s_from_ptyphims(xj)
+        print(f'xi.shape: {xi.shape}')
+        print(f'xi[0]: {xi[0]}')
         xij = xi + xj
         lnm2 = torch.log(to_m2(xij, eps=eps))
+        print(f'lnm2.shape: {lnm2.shape}')
+        print(f'lnm2[:5]: {lnm2[:5]}')
         outputs.append(lnm2)
 
     if num_outputs > 4:
@@ -125,6 +178,10 @@ def pairwise_lv_fts(xi, xj, num_outputs=4, eps=1e-8):
         outputs += [deltarap, deltaphi]
 
     assert (len(outputs) == num_outputs)
+    #print(f'len(outputs): {len(outputs)}')
+    #print(f'outputs[0].shape: {outputs[0].shape}')
+    aux = torch.cat(outputs, dim=1)
+    #print(f'aux.shape: {aux.shape}')
     return torch.cat(outputs, dim=1)
 
 
@@ -236,7 +293,7 @@ class Embed(nn.Module):
         
         if self.input_bn is not None:
             # x: (batch, embed_dim, seq_len)
-            #x = self.input_bn(x)
+            x = self.input_bn(x)
             x = x.permute(2, 0, 1).contiguous()
         # x: (seq_len, batch, embed_dim)
 
@@ -286,7 +343,7 @@ class PairEmbed(nn.Module):
                 if use_pre_activation_pair:
                     module_list = module_list[:-1]
                 self.embed = nn.Sequential(*module_list)
-
+                print(f'self.embed: {self.embed}')
             if pairwise_input_dim > 0:
                 input_dim = pairwise_input_dim
                 module_list = [nn.BatchNorm1d(input_dim)] if normalize_input else []
@@ -308,6 +365,7 @@ class PairEmbed(nn.Module):
         # x: (batch, v_dim, seq_len) with v_dim = num_features for the input to the interaction terms. The default is 4 for [px, py, pz, E]
         # uu: (batch, v_dim, seq_len, seq_len)
         assert (x is not None or uu is not None)
+        #print(f'forward  PairEmbed: x.shape: {x.shape}')
         with torch.no_grad():
             if x is not None:
                 batch_size, _, seq_len = x.size()
@@ -319,12 +377,18 @@ class PairEmbed(nn.Module):
                 # Careful to not double-count. 
                 i, j = torch.tril_indices(seq_len, seq_len, offset=-1 if self.remove_self_pair else 0,
                                           device=(x if x is not None else uu).device)
+         #       print(f'i.shape: {i.shape}')
+          #      print(f'j.shape: {j.shape}')
                 if x is not None:
                     x = x.unsqueeze(-1).repeat(1, 1, 1, seq_len) # (batch, v_dim, seq_len, seq_len) 
+           #         print(f'x.shape: {x.shape}')
                     # print some values for x to see what it looks like
                     xi = x[:, :, i, j]  # (batch, v_dim, seq_len*(seq_len+-1)/2) +: if we include self-pairs, -: otherwise
                     xj = x[:, :, j, i]
                     x = self.pairwise_lv_fts(xi, xj)
+            #        print(f'xi.shape: {xi.shape}')
+             #       print(f'xj.shape: {xj.shape}')
+              #      print(f'x.shape: {x.shape}')
                 if uu is not None:  
                     # (batch, v_dim, seq_len*(seq_len+1)/2)
                     uu = uu[:, :, i, j]
@@ -347,7 +411,7 @@ class PairEmbed(nn.Module):
                     pair_fts = x
                 else:
                     pair_fts = torch.cat((x, uu), dim=1)
-
+        #print(f'forward  PairEmbed: x.shape: {x.shape}')
         if self.mode == 'concat':
             elements = self.embed(pair_fts)  # (batch, embed_dim, num_elements)
         elif self.mode == 'sum':
@@ -462,11 +526,11 @@ class Encoder(nn.Module):
                  pair_extra_dim=0, # ?
                  remove_self_pair=False,
                  use_pre_activation_pair=True,
-                 embed_dims=[8, 16], #[128, 512, 128],   # the MLP for transforming the particle features input 
-                 pair_embed_dims=[8, 8, ], #64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
+                 embed_dims=[32, 64, 64], #[128, 512, 128],   # the MLP for transforming the particle features input 
+                 pair_embed_dims=[32, 32, 64], #64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
                                                # one more layers to this to match the number of heads in the attention layer.
-                 num_heads=1,  # how many attention heads in each particle attention block
-                 num_layers=1, # how many particle attention blocks
+                 num_heads=4,  # how many attention heads in each particle attention block
+                 num_layers=2, # how many particle attention blocks
                  block_params=None,
                  activation='gelu',
                  # misc
@@ -516,6 +580,11 @@ class Encoder(nn.Module):
         # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs): Sparce format for indexing the pairs  
         st = x # save the input for later use
         batch_size, _, num_particles = x.size()
+        if pr:
+            print(f'Encoder input shape: {x.shape}')
+            print(f'x[:2,:,:5]: {x[:2,:,:5]}')
+            print()
+
         with torch.no_grad():
             if not self.for_inference: # if training 
                 if uu_idx is not None:
@@ -526,14 +595,22 @@ class Encoder(nn.Module):
         with torch.cuda.amp.autocast(enabled=self.use_amp): # if true it lowers the precision of some computations to half precision for faster computation
                                                             # The default for self.use_amp = False
 
-            # input embedding 
+            # input embedding. Will change x.shape to x: (seq_len=num_particles in a jet, batch_size, embed_dim)
             x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)  # masked_fill: fill the elements of x with 0 where mask is False
                                                                       # mask.permute(2, 0, 1) -> (P, N, 1)
 
             # pair embedding to get the interaction terms between pairs of particles -> Acts as the bias in the attention layer of the particle attn block.
+            if pr:
+                print(f'Embedded x')
+                print(f'mask.shape: {mask.shape}')
+                print(f'mask[:3, :5, :5]: {mask[:3, :5, :5]}')
+                print()
+                print(f'x.shape: {x.shape}')
+                print(f'x[:4,:2,:5]: {x[:4,2,:5]}')
+                print()
 
             attn_mask = None
-            if False and (v is not None or uu is not None) and self.pair_embed is not None:
+            if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
                 if pr:
                     print(f'attn_mask.shape: {attn_mask.shape}')
@@ -547,9 +624,19 @@ class Encoder(nn.Module):
                    
                 attn_mask = torch.where(bool_mask, attn_mask, torch.tensor(0).to(attn_mask.dtype).to(attn_mask.device))
 
+
             # transform
             for block in self.blocks:
+                if pr:
+                    print(f'x.shape: {x.shape}')
+                    print(f'x[:2, :5, :5]: {x[0, :5, :5]}')
+                    print()
                 x = block(x, padding_mask=padding_mask, attn_mask = attn_mask)
+            
+            if pr:
+                print(f'x.shape: {x.shape}')
+                print(f'x[0, :5, :5]: {x[0, :5, :5]}')
+                print()
 
             x = self.proj_to_2d(x) # should we permute the dimensions here? check the dims. Check the padded particles if they are zeroed out.
 
@@ -564,7 +651,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(self, 
-                 embed_dims=[8, 16], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
+                 embed_dims=[32, 64, 64], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
                  num_heads=4,  # how many attention heads in each particle attention block
                  num_layers=2, # how many particle attention blocks
                  activation='gelu',
