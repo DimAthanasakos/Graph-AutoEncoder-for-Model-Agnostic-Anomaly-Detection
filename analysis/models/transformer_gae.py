@@ -272,7 +272,7 @@ class SequenceTrimmer(nn.Module):
 
 
 class Embed(nn.Module):
-    def __init__(self, input_dim, dims, normalize_input=True, activation='gelu'):
+    def __init__(self, input_dim, dims, normalize_input=False, activation='gelu'):
         super().__init__()
 
         self.input_bn = nn.BatchNorm1d(input_dim) if normalize_input else None
@@ -281,7 +281,7 @@ class Embed(nn.Module):
         for index, dim in enumerate(dims):
             module_list.extend([
                 # WARNING THE >2 WAS >1
-                nn.LayerNorm(input_dim) if starting_dim > 2  else nn.Identity(), # LayerNorm averages across the feature space for the same particle. For 1d input space this leads to a random classifier.
+                #nn.LayerNorm(input_dim) if starting_dim > 2  else nn.Identity(), # LayerNorm averages across the feature space for the same particle. For 1d input space this leads to a random classifier.
                                                                                  # Surprisingly, for 1d input space, although we can use LayerNorm for later layers, this decreases the performance. 
                 nn.Linear(input_dim, dim),
                 nn.GELU() if activation == 'gelu' else nn.ReLU(),
@@ -290,14 +290,17 @@ class Embed(nn.Module):
         self.embed = nn.Sequential(*module_list)
 
     def forward(self, x):
-        
+        #print(f'forward  Embed: x.shape: {x.shape}')
         if self.input_bn is not None:
             # x: (batch, embed_dim, seq_len)
             x = self.input_bn(x)
-            x = x.permute(2, 0, 1).contiguous()
+        x = x.permute(2, 0, 1).contiguous()
+        #print(f'forward  Embed: x.shape: {x.shape}')
         # x: (seq_len, batch, embed_dim)
-
-        return self.embed(x)
+        x= self.embed(x)
+        #print(f'forward  Embed: x.shape: {x.shape}')
+        #time.sleep(10)
+        return x
 
 
 class PairEmbed(nn.Module):
@@ -343,7 +346,6 @@ class PairEmbed(nn.Module):
                 if use_pre_activation_pair:
                     module_list = module_list[:-1]
                 self.embed = nn.Sequential(*module_list)
-                print(f'self.embed: {self.embed}')
             if pairwise_input_dim > 0:
                 input_dim = pairwise_input_dim
                 module_list = [nn.BatchNorm1d(input_dim)] if normalize_input else []
@@ -526,11 +528,11 @@ class Encoder(nn.Module):
                  pair_extra_dim=0, # ?
                  remove_self_pair=False,
                  use_pre_activation_pair=True,
-                 embed_dims=[32, 64, 64], #[128, 512, 128],   # the MLP for transforming the particle features input 
-                 pair_embed_dims=[32, 32, 64], #64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
+                 embed_dims=[8, 16], #[8,], #[128, 512, 128],   # the MLP for transforming the particle features input 
+                 pair_embed_dims=[16, 16,], #64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
                                                # one more layers to this to match the number of heads in the attention layer.
-                 num_heads=4,  # how many attention heads in each particle attention block
-                 num_layers=2, # how many particle attention blocks
+                 num_heads=2,  # how many attention heads in each particle attention block
+                 num_layers=1, # how many particle attention blocks
                  block_params=None,
                  activation='gelu',
                  # misc
@@ -569,9 +571,13 @@ class Encoder(nn.Module):
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,) if pair_embed_dims is not None and pair_input_dim + pair_extra_dim > 0 else None
         
-        self.blocks = nn.ModuleList([Block(**cfg_block) for _ in range(num_layers)])
+        self.pair_embed = None
 
+        self.blocks = nn.ModuleList([Block(**cfg_block) for _ in range(num_layers)])
+        #self.blocks = None 
         self.proj_to_2d = nn.Linear(embed_dim, 2)
+        self.proj_to_3d = nn.Linear(2, 3)
+        #self.proj_to_2d = None
 
     def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, graph = None, pr=False):
         # x: (N, C, P)
@@ -591,14 +597,32 @@ class Encoder(nn.Module):
                     uu = build_sparse_tensor(uu, uu_idx, x.size(-1)) # returns: (N, C', P, P)
             x, v, mask, uu, graph = self.trimmer(x, v, mask, uu, graph)            # 
             padding_mask = ~mask.squeeze(1)                          # (N, P) and padded = 1, real particle = 0 now due to ~ (bitwise not)
+        if pr: 
+            print(f'Trimmed input')
+            print(f'x.shape: {x.shape}')
+            print(f'v.shape: {v.shape}')
+            print(f'mask.shape: {mask.shape}')
+            print(f'uu.shape: {uu.shape if uu is not None else None}')
+            print(f'x[:2,:,:5]: {x[:2,:,:5]}')
+            print()
 
         with torch.cuda.amp.autocast(enabled=self.use_amp): # if true it lowers the precision of some computations to half precision for faster computation
                                                             # The default for self.use_amp = False
 
             # input embedding. Will change x.shape to x: (seq_len=num_particles in a jet, batch_size, embed_dim)
-            x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)  # masked_fill: fill the elements of x with 0 where mask is False
+            if isinstance(self.embed, nn.Identity):
+                #print(f'No embedding')
+                #print(f'x.shape: {x.shape}')
+                x = x.permute(2, 0, 1)
+                #print(f'x.shape: {x.shape}')
+            else:
+                x = self.embed(x)#.masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)  # masked_fill: fill the elements of x with 0 where mask is False
                                                                       # mask.permute(2, 0, 1) -> (P, N, 1)
 
+            #print(f'mask.shape: {mask.shape}')
+            m_aux = mask.permute(2, 0, 1)
+            #print(f'm_aux.shape: {m_aux.shape}')
+            x = x.masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
             # pair embedding to get the interaction terms between pairs of particles -> Acts as the bias in the attention layer of the particle attn block.
             if pr:
                 print(f'Embedded x')
@@ -610,7 +634,7 @@ class Encoder(nn.Module):
                 print()
 
             attn_mask = None
-            if (v is not None or uu is not None) and self.pair_embed is not None:
+            if  (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
                 if pr:
                     print(f'attn_mask.shape: {attn_mask.shape}')
@@ -626,13 +650,14 @@ class Encoder(nn.Module):
 
 
             # transform
-            for block in self.blocks:
-                if pr:
-                    print(f'x.shape: {x.shape}')
-                    print(f'x[:2, :5, :5]: {x[0, :5, :5]}')
-                    print()
-                x = block(x, padding_mask=padding_mask, attn_mask = attn_mask)
-            
+            if self.blocks is not None:
+                for block in self.blocks:
+                    if pr:
+                        print(f'x.shape: {x.shape}')
+                        print(f'x[:2, :5, :5]: {x[0, :5, :5]}')
+                        print()
+                    x = block(x, padding_mask=padding_mask, attn_mask = attn_mask)
+                
             if pr:
                 print(f'x.shape: {x.shape}')
                 print(f'x[0, :5, :5]: {x[0, :5, :5]}')
@@ -640,20 +665,23 @@ class Encoder(nn.Module):
 
             x = self.proj_to_2d(x) # should we permute the dimensions here? check the dims. Check the padded particles if they are zeroed out.
 
+            x = self.proj_to_3d(x)
+
             # reshape x to (batch_size, 2, num_particles)
             x = x.permute(1, 2, 0) 
             if pr:
                 print(f'x.shape: {x.shape}')
                 print(f'x[0, :, :5]: {x[0, :, :5]}')
                 print()
+                time.sleep(3)
             return x
 
 
 class Decoder(nn.Module):
     def __init__(self, 
-                 embed_dims=[32, 64, 64], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
-                 num_heads=4,  # how many attention heads in each particle attention block
-                 num_layers=2, # how many particle attention blocks
+                 embed_dims=[8,], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
+                 num_heads=1,  # how many attention heads in each particle attention block
+                 num_layers=1, # how many particle attention blocks
                  activation='gelu',
                  use_amp=False,
                  **kwargs):
@@ -669,14 +697,15 @@ class Decoder(nn.Module):
                            add_bias_kv=False, activation=activation,
                            scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True)
 
-        self.embed = Embed(2, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity() 
+        self.embed = Embed(3, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity() 
         self.blocks = nn.ModuleList([Block(**default_cfg) for _ in range(num_layers)])
 
         self.proj_to_3d = nn.Linear(embed_dim, 3)
 
 
     def forward(self, x, pr=False):
-        
+        # reshape x to (batch_size, 2, num_particles)
+        #x = x.permute(1, 2, 0) 
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             # check if we need to mask the padded particles here.
             x = self.embed(x)
@@ -691,9 +720,15 @@ class TAE(nn.Module):
     def __init__(self, encoder_cfg, decoder_cfg, **kwargs):
         super().__init__(**kwargs)
         self.encoder = Encoder(**encoder_cfg)
-        self.decoder = Decoder(**decoder_cfg)
+        #self.decoder = Decoder(**decoder_cfg)
 
     def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, graph=None, pr=False):
         x = self.encoder(x, v, mask, uu, uu_idx, graph, pr)
-        x = self.decoder(x, pr)
+        #print(f'after encoder')
+        #print(f'x.shape: {x.shape}')
+        x = x.permute(0, 2, 1)
+        #x = self.decoder(x, pr)
+        #print(f'after decoder')
+        #print(f'x.shape: {x.shape}')
+        #time.sleep(2)
         return x

@@ -25,6 +25,7 @@ from torch_geometric.loader import DataLoader #.data.DataLoader has been depreca
 from torch_scatter import scatter_mean
 
 from models.models import EdgeNet, EdgeNetVAE, EdgeNet2, EdgeNetDeeper, GATAE
+import ml_anomaly
 
 import networkx
 import energyflow as ef 
@@ -32,7 +33,7 @@ import random
 
 
 class gae(): 
-    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plotstest4'):
+    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_test'):
         self.model_info = model_info
         self.path = model_info['path_SB'] # path to the data (pyg dataset)
         self.ddp = model_info['ddp']
@@ -95,7 +96,7 @@ class gae():
 
         dataset = torch.load(self.path)
 
-        random.Random(0).shuffle(dataset)
+        #random.Random(0).shuffle(dataset)
         print(f'Loaded training (SB) dataset with {len(dataset)} samples')
         print()
         if self.rank==0 and self.n_total > len(dataset):
@@ -118,12 +119,10 @@ class gae():
         if self.ddp:
             self.train_sampler = DistributedSampler(train_dataset, shuffle=True)
             train_loader = DataLoader(train_dataset, batch_size=self.batch_size, sampler = self.train_sampler)
-            valid_loader = DataLoader(valid_dataset, batch_size=self.batch_size, shuffle=False)
-            test_loader  = DataLoader(test_dataset,  batch_size=self.batch_size, shuffle=False)
         else:
-            train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-            valid_loader = DataLoader(valid_dataset, batch_size=self.batch_size, shuffle=False)
-            test_loader  = DataLoader(test_dataset,  batch_size=self.batch_size, shuffle=False)
+            train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False)
+        valid_loader = DataLoader(valid_dataset, batch_size=self.batch_size, shuffle=False)
+        test_loader  = DataLoader(test_dataset,  batch_size=self.batch_size, shuffle=False)
 
         return train_loader, valid_loader, test_loader 
 
@@ -135,7 +134,7 @@ class gae():
         '''
         model_to_choose = self.model_info['model']
         if model_to_choose == 'EdgeNet':
-            model = EdgeNet(input_dim=3, big_dim=32, hidden_dim=2, aggr='mean')
+            model = EdgeNet(input_dim=3, big_dim=32, hidden_dim=3, aggr='mean')
         elif model_to_choose == 'GATAE':
             model = GATAE(input_dim=3, hidden_dim=32, latent_dim=2, heads=2, dropout=0.0, add_skip=True)
 
@@ -163,15 +162,17 @@ class gae():
             if self.ddp: self.train_sampler.set_epoch(epoch)  
 
             t_start = time.time()
-            loss_train = self._train_loop()
+            loss_train = self._train_loop(ep=epoch)
             loss_val = self._test_loop(self.val_loader,)
             loss_test = self._test_loop(self.test_loader,)
             
+            if epoch%4==0:
+                AUC = ml_anomaly.anomaly(self.model, self.model_info, plot=False).run()
             # only print if its the main process
             if self.rank == 0:
-                print("--------------------------------")
                 print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.6f}, loss_val: {loss_val:.6f}, loss_test: {loss_test:.6f}, lr: {self.optimizer.param_groups[0]["lr"]:.6f}, Time: {time.time() - t_start:.1f} sec')
-
+                print("--------------------------------")
+                
             if loss_val < best_val_loss:
                 best_val_loss = loss_val
                 torch.save(self.model.state_dict(), best_model_path)
@@ -199,11 +200,11 @@ class gae():
 
 
     #---------------------------------------------------------------
-    def _train_loop(self,):
+    def _train_loop(self,ep=-1):
         self.model.train()
         loss_cum = 0
         count = 0
-        for batch_jets0, batch_jets1 in self.train_loader:
+        for batch_idx, (batch_jets0, batch_jets1) in enumerate(self.train_loader):
             self.optimizer.zero_grad()
             length = len(batch_jets0)
             batch_jets0 = batch_jets0.to(self.torch_device)
@@ -211,11 +212,41 @@ class gae():
 
             out0 = self.model(batch_jets0)
             out1 = self.model(batch_jets1)
-            
-            loss0 = self.criterion(out0, batch_jets0.x) * 100 # multiply by 1000 to scale the loss
-            loss1 = self.criterion(out1, batch_jets1.x) * 100
+            #print(f'out0.shape: {out0.shape}')
+            if batch_idx==0 and ep%1==0:
+                n_print = min(2, length)
+                values_to_match = torch.arange(0, n_print, device=batch_jets0.batch.device)  # Values from 0 to n_print-1
+                mask0 = (batch_jets0.batch.unsqueeze(1) == values_to_match).any(dim=1)
+                #mask0 = (batch_jets0.batch == 0) | (batch_jets0.batch == 1)
+                in0 = batch_jets0.x[mask0].reshape(n_print, -1, 3)
+                out0_reshaped = out0.reshape(-1, in0.shape[1], 3)
+
+                l = torch.nn.MSELoss(reduction='none')(out0, batch_jets0.x)
+                l = l.reshape(-1, in0.shape[1], 3)
+                l_clamped = torch.clamp(l, min=-3, max=3)
+                l_clamped = torch.round(l_clamped*1000)/1000
+
+                # 'out0.x' has the node features after passing through the model.
+                # 'batch_jets0.x' are the original input features for the same nodes.
+                # We'll just print a few rows (.head equivalent) for clarity:
+                print("=== First graph in the first batch of this epoch ===")
+                print(f'in0[:2, :5]:' )
+                print(in0[:2, :5])
+                print()
+                print("====================================================\n")
+                print(f'out0_reshaped[:2,:5]:' )
+                print(out0_reshaped[:2,:5])
+                print()
+                print("====================================================\n")
+                print(f'l_clamped[:2, :5]:' )
+                print(l_clamped[:2, :5])
+                print()
+                print("====================================================\n")
+
+            loss0 = self.criterion(out0, batch_jets0.x)   # multiply by 100 to scale the loss
+            loss1 = self.criterion(out1, batch_jets1.x)  
             loss = loss0 + loss1
-            #print(f'loss: {loss.item()}')
+
             loss.backward()
             self.optimizer.step()
             loss_cum += loss.item() * length
@@ -311,6 +342,7 @@ class gae():
         plt.xlabel('Loss')
         plt.ylabel('Counts')
         plt.title('Comparison of Two Loss Distributions')
+        plt.grid()
         plt.legend()
         plt.tight_layout()
 

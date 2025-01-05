@@ -909,8 +909,6 @@ class ParT():
         self.patience = self.model_info['model_settings']['patience']
         #if self.set_ddp: # Adjust batch size for DDP
         #    self.batch_size = self.batch_size // torch.cuda.device_count()
-        if self.local_rank == 0:
-            print(f'batch_size: {self.batch_size}')
 
 
         self.lossname = self.model_info['model_settings']['lossname']
@@ -924,7 +922,11 @@ class ParT():
         
         # Use custon training parameters
         self.epochs = self.model_info['model_settings']['epochs']
-        self.learning_rate = self.model_info['model_settings']['learning_rate']
+        self.learning_rate = self.model_info['model_settings']['learning_rate']        
+        if self.set_ddp and self.local_rank == 0:
+            self.learning_rate = self.learning_rate * torch.cuda.device_count() # Adjust learning rate for DDP
+            print(f'for ddp training with {torch.cuda.device_count()} GPUs, the learning rate is adjusted accordingly.')
+
 
         # Default values:            
         self.graph_transformer = False
@@ -1001,15 +1003,17 @@ class ParT():
             # Load the data for the main process (rank 0)
             self.X_ParT, self.Y_ParT = self.load_particles(use_SR=False)
 
+            # Delete the last-column (pid or masses or E) of the particles
+            self.X_ParT = self.X_ParT[:,:,:,:3]
+
             print(f'X_ParT.shape: {self.X_ParT.shape}')
             print(f'self.X_ParT[0, :, :5, :]: {self.X_ParT[0, :, :5, :]}')
             print()
-            # Delete the last-column (pid or masses or E) of the particles
-            self.X_ParT = self.X_ParT[:,:,:,:3]
             
             non_zero_particles = np.linalg.norm(self.X_ParT, axis=3) != 0
             valid_n = non_zero_particles.sum(axis = 2)
             print('average number of particles per jet:', np.mean(valid_n))
+            print()
             # TODO:
                 
             # Change the order of the features from (pt, eta, phi, pid) to (px, py, pz, E) to agree with the architecture.ParticleTransformer script
@@ -1023,13 +1027,17 @@ class ParT():
             # Transpose the data to match the ParticleNet/ParT architecture convention which is (batch_size, 2, n_features, n_particles) 
             # instead of the current shape (batch_size, 2, n_particles, n_features)
             self.X_ParT = np.transpose(self.X_ParT, (0, 1, 3, 2))
-
+            #print(f'X_ParT.shape: {self.X_ParT.shape}')
+            #print(f'self.X_ParT[0, :, :5, :]: {self.X_ParT[0, :, :5, :]}')
+            #print()
             if self.graph_transformer:
                 features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test, graph_train, graph_val, graph_test = self.load_data(self.X_ParT, self.Y_ParT, graph_transformer = self.graph_transformer, sorting_key = self.sorting_key)
             else:   
                 features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test = self.load_data(self.X_ParT, self.Y_ParT, graph_transformer = self.graph_transformer, sorting_key = self.sorting_key)
                 graph_train, graph_val, graph_test = (None,) * 3
-        
+            #print(f'features_train.shape: {features_train.shape}')
+            #print(f'features_train[0, :, :5, :]: {features_train[0, :, :5, :]}')
+            #print()
         else: # Initialize the data loaders for all but the main process (rank 0)
             features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test, graph_train, graph_val, graph_test = (None,) * 9
         
@@ -1207,7 +1215,7 @@ class ParT():
             if not train: # classification
                 return X, Y
             
-            (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test) = energyflow.utils.data_split(X, Y, val=self.n_val, test=self.n_test)
+            (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test) = energyflow.utils.data_split(X, Y, val=self.n_val, test=self.n_test, shuffle = False)
             return (features_train, features_val, features_test, Y_ParT_train, Y_ParT_val, Y_ParT_test)
         
     #---------------------------------------------------------------
@@ -1267,8 +1275,8 @@ class ParT():
             loss_test = self._test_part(self.test_loader,)
             loss_val = self._test_part(self.val_loader, )
             #f_loss_train = self._test_part(self.train_loader, )
-            if self.local_rank == 0 and epoch%1==0:
-                self.run_anomaly(plot=False)
+            if self.local_rank == 0 and epoch%4==0:
+                self.run_anomaly(plot=False, ep=epoch)
             
             if self.local_rank == 0:
                 # Save the model with the best test AUC
@@ -1357,8 +1365,8 @@ class ParT():
             jet0 = jet0.permute(0, 2, 1)
             jet1 = jet1.permute(0, 2, 1)
                             
-            loss0 = self.criterion(out0, p3_0) * 100
-            loss1 = self.criterion(out1, p3_1) * 100
+            loss0 = self.criterion(out0, p3_0)  
+            loss1 = self.criterion(out1, p3_1) 
             loss = loss0 + loss1
             #if self.local_rank == 0:
             #    print(f'Index: {index}, loss: {loss.item()}')
@@ -1372,26 +1380,27 @@ class ParT():
                 # Avoid division by zero: Create a mask where p3_0 is non-zero
                 residual = p3_0 - out0  
                 nonzero_mask = (p3_0 != 0)
+                
+                l = torch.nn.MSELoss(reduction='none')(out0, p3_0)
+                l_clamped = torch.clamp(l, min=-3, max=3)
+                l_clamped = torch.round(l_clamped*100)/100
 
-                # Scale the residual by p3_0 where nonzero, else set it to 0
-                scaled_residual = torch.zeros_like(residual)
-                scaled_residual[nonzero_mask] = residual[nonzero_mask] / p3_0[nonzero_mask]
-
+                print(f'l.shape: {l.shape}')
 
                 print(f'===============')
-                print(f'jet0[0, :5, :5]: {jet0[0, :5, :5]}')
-                print(f'p3_0[0, :5, :5]: {p3_0[0, :5, :5]}')
-                print()
-                print(f'jet1[0, :5, :5]: {jet1[0, :5, :5]}')
-                print(f'p3_1[0, :5, :]: {p3_1[0, :5, :5]}')
+                print(f'p3_0[:2, :5, :5]:')
+                print(p3_0[:1, :5, :5])
+                print("====================================================\n")
+                print(f'out0[:2, :5, :5]:')
+                print(out0[:1, :5, :5])
+                print("====================================================\n")
+                print(f'l_clamped[:2, :5]')
+                print(l_clamped[:1, :5])
+                print("====================================================\n")
+                l_node = l.mean(dim=-1)
+                l_graph = l_node.mean(dim=-1)
 
-                
-                print(f'out0[:2, :5, :]: {out0[:2, :5, :]}')
-                print()
-                print(f'===============')
-                print()
-                
-
+            
             # Cache management
             torch.cuda.empty_cache()
             
@@ -1557,7 +1566,7 @@ class ParT():
 
 
     #---------------------------------------------------------------
-    def run_anomaly(self, plot = True):
+    def run_anomaly(self, ep=-1, plot = True):
         if self.local_rank == 0:
             self.model.eval()
             # A nodewise criterion
@@ -1580,8 +1589,10 @@ class ParT():
                     # zero the parameter gradients
                     self.optimizer.zero_grad()
 
-                    p3_0 = to_ptrapphim(jet0)
-                    p3_1 = to_ptrapphim(jet1)
+                    #p3_0 = to_ptrapphim(jet0)
+                    #p3_1 = to_ptrapphim(jet1)
+                    p3_0 = jet0 
+                    p3_1 = jet1
                     if self.input_dim == 1:
                         # create pt of each particle instead of (px, py, pz, E) for the input 
                         x0 = p3_0[:, 0, :].unsqueeze(1)
@@ -1598,6 +1609,34 @@ class ParT():
                     out1 = self.model(x = x1, v = jet1, graph = graph) 
                     p3_0 = p3_0.permute(0, 2, 1)
                     p3_1 = p3_1.permute(0, 2, 1)
+
+                    if index == 0 and self.local_rank == 0 and ep%5==0:
+                        # Avoid division by zero: Create a mask where p3_0 is non-zero
+                        residual = p3_0 - out0  
+                        nonzero_mask = (p3_0 != 0)
+
+                        # Scale the residual by p3_0 where nonzero, else set it to 0
+                        scaled_residual = torch.zeros_like(residual)
+                        scaled_residual[nonzero_mask] = residual[nonzero_mask] / p3_0[nonzero_mask]
+                        # Clip scaled_residual to [-1, 1]
+                        scaled_residual = torch.clamp(scaled_residual, min=-1, max=1)
+                        scaled_residual = torch.round(scaled_residual*100)/100
+
+
+                        print(f'===============')
+                        print(f'Anomaly Detection')
+                        print(f'p3_0[:2, :5, :5]:')
+                        print(p3_0[:2, :5, :5])
+                        print()
+                        
+                        print(f'out0[:2, :5, :5]:')
+                        print(out0[:2, :5, :5])
+                        print()
+                        print(f'scaled_residual[:2, :5, :5]:')
+                        print(scaled_residual[:2, :5, :5])
+                        #print("\n".join(["\t".join([f"{val:.2f}" for val in row]) for row in scaled_residual]))
+                        print()
+                        print(f'===============')
 
                     # 1) Nodewise loss => shape [N, F]
                     loss0_nodewise = criterion_node(out0, p3_0) * 100
@@ -1619,9 +1658,9 @@ class ParT():
                     all_scores.extend(scores.cpu().tolist())
                     all_labels.extend(labels.cpu().tolist())
 
-                    # ----- Compute ROC and AUC -----
-                    fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
-                    auc_val = auc(fpr, tpr)
+                # ----- Compute ROC and AUC -----
+                fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
+                auc_val = auc(fpr, tpr)
 
 
             print(f"Area Under Curve (AUC): {auc_val:.4f}")

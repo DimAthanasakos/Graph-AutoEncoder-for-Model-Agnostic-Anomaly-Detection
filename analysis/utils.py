@@ -82,8 +82,8 @@ def _preprocessing(particles,jets,mjj,save_json=True, norm = 'mean'):
 
     print(f'preprocessing')
     print(f'particles.shape: {particles.shape}')
-    print(f'particles[0, :, :15, :5]:')
-    print(particles[0, :, :15, :5])
+    print(f'particles[0, :, :5, :3]:')
+    print(particles[0, :, :5, :3])
     print()
     
     particles=particles.reshape(-1,particles.shape[-1]) #flatten
@@ -133,8 +133,8 @@ def _preprocessing(particles,jets,mjj,save_json=True, norm = 'mean'):
     #jets = jets.reshape(batch_size,2,-1)
 
     print(f'particles.shape: {particles.shape}')
-    print(f'particles[0, :, :15, :5]: ') 
-    print(particles[0, :, :15, :5])
+    print(f'particles[0, :, :5, :3]: ') 
+    print(particles[0, :, :5, :3])
     print()
     print()
 
@@ -312,7 +312,7 @@ def DataLoader(n_events,
 #---------------------------------------------------------------
 # Construct graphs from input_data and write them to file
 #---------------------------------------------------------------
-def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=40000, n_part=100):
+def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=12000, n_part=100):
     '''
     Construct graphs:
       - Particle graphs are constructed from energyflow dataset
