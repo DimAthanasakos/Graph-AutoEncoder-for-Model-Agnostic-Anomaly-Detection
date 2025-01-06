@@ -41,6 +41,7 @@ class gae():
         print(f'gae, device: {self.torch_device}')
         self.rank = 0
         self.plot_path = plot_path
+        self.ext_plot = model_info['ext_plot']
         if not os.path.exists(plot_path):
             os.makedirs(plot_path)
 
@@ -134,7 +135,7 @@ class gae():
         '''
         model_to_choose = self.model_info['model']
         if model_to_choose == 'EdgeNet':
-            model = EdgeNet(input_dim=3, big_dim=32, hidden_dim=3, aggr='mean')
+            model = EdgeNet(input_dim=3, big_dim=64, hidden_dim=2, aggr='mean')
         elif model_to_choose == 'GATAE':
             model = GATAE(input_dim=3, hidden_dim=32, latent_dim=2, heads=2, dropout=0.0, add_skip=True)
 
@@ -150,14 +151,16 @@ class gae():
         return model 
     
     #---------------------------------------------------------------
-    def train(self):
+    def train(self,):
         if self.rank == 0:
             print(f'Training...')
             print()
         best_val_loss = math.inf
         best_model_path = os.path.join(self.output_dir, 'model_best.pt')  # Path for saving the best model
         
-        
+        self.auc_list = []
+        self.train_loss_list = []
+        self.val_loss_list = []
         for epoch in range(1, self.epochs+1):
             if self.ddp: self.train_sampler.set_epoch(epoch)  
 
@@ -166,11 +169,15 @@ class gae():
             loss_val = self._test_loop(self.val_loader,)
             loss_test = self._test_loop(self.test_loader,)
             
-            if epoch%4==0:
+            if epoch%4==0 or self.ext_plot:
                 AUC = ml_anomaly.anomaly(self.model, self.model_info, plot=False).run()
+                self.auc_list.append(AUC)
+                self.train_loss_list.append(loss_train)
+                self.val_loss_list.append(loss_val)
+
             # only print if its the main process
             if self.rank == 0:
-                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.6f}, loss_val: {loss_val:.6f}, loss_test: {loss_test:.6f}, lr: {self.optimizer.param_groups[0]["lr"]:.6f}, Time: {time.time() - t_start:.1f} sec')
+                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.4f}, Time: {time.time() - t_start:.1f} sec')
                 print("--------------------------------")
                 
             if loss_val < best_val_loss:
@@ -213,7 +220,7 @@ class gae():
             out0 = self.model(batch_jets0)
             out1 = self.model(batch_jets1)
             #print(f'out0.shape: {out0.shape}')
-            if batch_idx==0 and ep%1==0:
+            if batch_idx==0 and ep%4==0:
                 n_print = min(2, length)
                 values_to_match = torch.arange(0, n_print, device=batch_jets0.batch.device)  # Values from 0 to n_print-1
                 mask0 = (batch_jets0.batch.unsqueeze(1) == values_to_match).any(dim=1)
@@ -271,8 +278,8 @@ class gae():
             out0 = self.model(batch_jets0)
             out1 = self.model(batch_jets1)
 
-            loss0 = self.criterion(out0, batch_jets0.x) * 100
-            loss1 = self.criterion(out1, batch_jets1.x) * 100
+            loss0 = self.criterion(out0, batch_jets0.x) 
+            loss1 = self.criterion(out1, batch_jets1.x) 
 
             loss = loss0 + loss1
 
@@ -285,7 +292,7 @@ class gae():
 
     #---------------------------------------------------------------
     @torch.no_grad()
-    def _plot_loss(self):
+    def _plot_loss(self, extended_plots=False):
         self.model.eval()
         event_losses = []
         # A nodewise criterion
@@ -299,8 +306,8 @@ class gae():
                 out2 = self.model(batch_jets1)
 
                 # 1) Nodewise loss => shape [N, F]
-                loss1_nodewise = criterion_node(out1, batch_jets0.x) * 100
-                loss2_nodewise = criterion_node(out2, batch_jets1.x) * 100
+                loss1_nodewise = criterion_node(out1, batch_jets0.x) 
+                loss2_nodewise = criterion_node(out2, batch_jets1.x)  
 
                 # 2) Average across features => shape [N]
                 loss1_per_node = loss1_nodewise.mean(dim=-1)
@@ -351,4 +358,42 @@ class gae():
         print(f"Saved loss distribution plot to: {plot_file}")
         print()
 
+        if self.ext_plot:
+            print(f'--------------------------------')
+            print(f'Plotting extended plots...')
+            print()
+            
+            # Plot the loss distribution of train and val with the AUC for each epoch
+            plot_file = os.path.join(self.plot_path, 'auc_vs_loss_distribution.pdf')
+            fig, ax1 = plt.subplots(figsize=(8, 6))
+
+            # Plot the loss distributions
+            epochs = range(1, len(self.auc_list) + 1)
+            ax1.plot(epochs, self.val_loss_list, color='blue', label='Val Loss', marker='o', linestyle='-')
+            ax1.plot(epochs, self.train_loss_list, color='red', label='Train Loss', marker='o', linestyle='-')
+            ax1.set_ylabel('Loss', color='black', fontsize='large')
+            ax1.set_xlabel('epochs', fontsize='large')
+            ax1.set_title('Loss Distribution and AUC', fontsize='x-large')
+            ax1.set_ylim(0.01, 0.15)
+            ax1.grid()
+            
+
+            # Add the secondary y-axis for AUC
+            ax2 = ax1.twinx()
+            print(f'self.auc_list: {self.auc_list}')
+            ax2.plot(epochs, self.auc_list, color='darkgreen', label='AUC', marker='o', linestyle='-')
+            ax2.set_ylabel('AUC', color='black', fontsize='large')
+            ax2.tick_params(axis='y', labelcolor='black', labelsize='medium')
+            # Scale the AUC axis to the range 0.5 to 1
+            ax2.set_ylim(0.7, 0.85)
+            ax2.grid()
+
+            # Add legend for AUC
+            fig.legend(loc='center right', fontsize='large', frameon=True, shadow=True, borderpad=1)
+
+            # Save the figure
+            plt.tight_layout()
+            plt.savefig(plot_file)
+            plt.close()     
+               
         return quantiles_loss

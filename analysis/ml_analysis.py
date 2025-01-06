@@ -24,13 +24,14 @@ class MLAnalysis(common_base.CommonBase):
     #---------------------------------------------------------------
     # Constructor
     #---------------------------------------------------------------
-    def __init__(self, config_file='', output_dir='', ddp=False, models = None, **kwargs):
+    def __init__(self, config_file='', output_dir='', ddp=False, models = None, ext_plot=False, **kwargs):
         super(common_base.CommonBase, self).__init__(**kwargs)
         
         self.config_file = config_file
         self.output_dir = output_dir
         self.ddp = ddp  
         self.models = models
+        self.ext_plot = ext_plot
         
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
@@ -102,7 +103,8 @@ class MLAnalysis(common_base.CommonBase):
                         'n_test': self.n_test,
                         'torch_device': self.torch_device,
                         'output_dir': self.output_dir,
-                        'ddp': self.ddp}                
+                        'ddp': self.ddp,
+                        'ext_plot': self.ext_plot,}             
 
             if model in ['transformer', 'transformer_graph']:
                 model_key = f'{model}'

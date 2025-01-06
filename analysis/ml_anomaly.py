@@ -45,7 +45,6 @@ class anomaly():
             os.makedirs(plot_path)
             
 
-
         self.n_bkg = model_info['model_settings']['n_bkg']
         self.n_sig = model_info['model_settings']['n_sig']
         self.lossname = self.model_info['model_settings']['lossname']
@@ -63,7 +62,7 @@ class anomaly():
 
         dataset = torch.load(self.path)
 
-        random.Random(0).shuffle(dataset)
+        #random.Random(0).shuffle(dataset)
         #print(f'Loaded testing (SR) dataset with {len(dataset)} samples')
         dataset = dataset[:self.n_bkg + self.n_sig]
         dataset = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
@@ -110,9 +109,9 @@ class anomaly():
                 all_scores.extend(scores.cpu().tolist())
                 all_labels.extend(batch_jets0.y.cpu().tolist())  # or however your labels are stored
                 
-                # ----- Compute ROC and AUC -----
-                fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
-                auc_val = auc(fpr, tpr)
+            # ----- Compute ROC and AUC -----
+            fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
+            auc_val = auc(fpr, tpr)
 
         
         print(f"Area Under Curve (AUC): {auc_val:.4f}")
@@ -145,8 +144,8 @@ class anomaly():
 
 
             # Compute the 99th percentile for both distributions
-            p99_normal = np.percentile(normal_scores, 99)
-            p99_anomalous = np.percentile(anomalous_scores, 99)
+            p99_normal = np.percentile(normal_scores, 95)
+            p99_anomalous = np.percentile(anomalous_scores, 95)
 
             # Determine the x-axis limit (max of the two 95th percentiles)
             x_max = max(p99_normal, p99_anomalous)
@@ -162,8 +161,8 @@ class anomaly():
 
             plt.figure(figsize=(6, 5))
             # density=True => each histogram integrates to 1, letting you compare shapes
-            plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
-            plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+            plt.hist(normal_scores, bins=bin_edges, label="Background (label=0)", color="green", histtype='step', density=True)
+            plt.hist(anomalous_scores, bins=bin_edges, label="Signal (label=1)", color="red", histtype='step', density=True)
 
             plt.xlabel("Loss Score")
             plt.xlim(0, x_max)
@@ -175,3 +174,4 @@ class anomaly():
             plt.savefig(dist_plot_file, dpi=300)
             plt.close()
             print(f"Saved loss distribution plot to: {dist_plot_file}")
+        return auc_val
