@@ -307,7 +307,7 @@ class PairEmbed(nn.Module):
     def __init__(
             self, pairwise_lv_dim, pairwise_input_dim, dims,
             remove_self_pair=False, use_pre_activation_pair=True, mode='sum',
-            normalize_input=True, activation='gelu', eps=1e-8,):
+            normalize_input=False, activation='gelu', eps=1e-8,):
         super().__init__()
 
         self.pairwise_lv_dim = pairwise_lv_dim # the number of features for the pairwise interaction terms. The default is 4 for [lnΔ, lnk_t, lnz, lnm^2]
@@ -437,9 +437,10 @@ class Block(nn.Module):
     def __init__(self, embed_dim=128, num_heads=8, ffn_ratio=4,
                  dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                  add_bias_kv=False, activation='gelu',
-                 scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True):
+                 scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True, need_weights=False):
         super().__init__()
-
+        
+        self.need_weights = need_weights
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
@@ -480,18 +481,18 @@ class Block(nn.Module):
 
         residual = x
         x = self.pre_attn_norm(x)
-        x, weights = self.attn(x, x, x, key_padding_mask=padding_mask, attn_mask=attn_mask)  # (seq_len, batch, embed_dim). By default it returnes the attention weights as well 
-        #print(f'x.shape: {x.shape}')
-        #print(f'weights.shape: {weights.shape}')
-        #print()
-        # print the attention weights for the first head of the first particle
-        #print(f'weights[0, 0, :10]: {weights[0, 0, :10]}')
-        #print()
+        x = self.attn(x, x, x, key_padding_mask=padding_mask, attn_mask=attn_mask, need_weights=self.need_weights)  # (seq_len, batch, embed_dim). By default it returnes the attention weights as well 
+                                                                                                        # with need_weights=False, we only get the output of the attention layer, major speedup
+                                                                                                        # with need_weights=True, we get the attention weights as well as a 2nd output
         # DA: Pytorch throws a warning here which I suspect is relevant to: https://github.com/pytorch/pytorch/issues/95702 
         # It looks like a bug of pytorch 2.x 
         # TODO: Address this or hope that it's resolved in the next version of pytorch
         warnings.filterwarnings("ignore", message="Support for mismatched key_padding_mask and attn_mask is deprecated.*")
 
+        # Ensure `x` is a tensor (handle tuple output)
+        if isinstance(x, tuple):
+            x = x[0]
+            
         if self.c_attn is not None:
             tgt_len = x.size(0)
             x = x.view(tgt_len, -1, self.num_heads, self.head_dim)
@@ -528,11 +529,11 @@ class Encoder(nn.Module):
                  pair_extra_dim=0, # ?
                  remove_self_pair=False,
                  use_pre_activation_pair=True,
-                 embed_dims=[8, 16], #[8,], #[128, 512, 128],   # the MLP for transforming the particle features input 
-                 pair_embed_dims=[16, 16,], #64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
+                 embed_dims=[32, 64, 64], #[8,], #[128, 512, 128],   # the MLP for transforming the particle features input 
+                 pair_embed_dims=[32, 32,], #64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
                                                # one more layers to this to match the number of heads in the attention layer.
-                 num_heads=2,  # how many attention heads in each particle attention block
-                 num_layers=1, # how many particle attention blocks
+                 num_heads=4,  # how many attention heads in each particle attention block
+                 num_layers=3, # how many particle attention blocks
                  block_params=None,
                  activation='gelu',
                  # misc
@@ -550,7 +551,7 @@ class Encoder(nn.Module):
 
         embed_dim = embed_dims[-1] if len(embed_dims) > 0 else input_dim
         default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=4,
-                           dropout=0., attn_dropout=0., activation_dropout=0.,
+                           dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                            add_bias_kv=False, activation=activation,
                            scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True)
 
@@ -571,12 +572,12 @@ class Encoder(nn.Module):
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,) if pair_embed_dims is not None and pair_input_dim + pair_extra_dim > 0 else None
         
-        self.pair_embed = None
+        #self.pair_embed = None
 
         self.blocks = nn.ModuleList([Block(**cfg_block) for _ in range(num_layers)])
         #self.blocks = None 
         self.proj_to_2d = nn.Linear(embed_dim, 2)
-        self.proj_to_3d = nn.Linear(2, 3)
+        #self.proj_to_3d = nn.Sequential(nn.Linear(2, 32), nn.ReLU(), nn.Linear(32, 32), nn.ReLU(), nn.Linear(32, 3))
         #self.proj_to_2d = None
 
     def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, graph = None, pr=False):
@@ -597,6 +598,7 @@ class Encoder(nn.Module):
                     uu = build_sparse_tensor(uu, uu_idx, x.size(-1)) # returns: (N, C', P, P)
             x, v, mask, uu, graph = self.trimmer(x, v, mask, uu, graph)            # 
             padding_mask = ~mask.squeeze(1)                          # (N, P) and padded = 1, real particle = 0 now due to ~ (bitwise not)
+            padding_mask = padding_mask.float().masked_fill(padding_mask, float('-inf')) # (N, P) and padded = -inf, real particle = 0
         if pr: 
             print(f'Trimmed input')
             print(f'x.shape: {x.shape}')
@@ -665,7 +667,7 @@ class Encoder(nn.Module):
 
             x = self.proj_to_2d(x) # should we permute the dimensions here? check the dims. Check the padded particles if they are zeroed out.
 
-            x = self.proj_to_3d(x)
+            #x = self.proj_to_3d(x)
 
             # reshape x to (batch_size, 2, num_particles)
             x = x.permute(1, 2, 0) 
@@ -679,9 +681,9 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(self, 
-                 embed_dims=[8,], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
-                 num_heads=1,  # how many attention heads in each particle attention block
-                 num_layers=1, # how many particle attention blocks
+                 embed_dims=[32, 64, 64], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
+                 num_heads=4,  # how many attention heads in each particle attention block
+                 num_layers=3, # how many particle attention blocks
                  activation='gelu',
                  use_amp=False,
                  **kwargs):
@@ -693,13 +695,13 @@ class Decoder(nn.Module):
 
         embed_dim = embed_dims[-1] if len(embed_dims) > 0 else 2
         default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=4,
-                           dropout=0., attn_dropout=0., activation_dropout=0.,
+                           dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                            add_bias_kv=False, activation=activation,
                            scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True)
 
-        self.embed = Embed(3, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity() 
+        self.embed = Embed(2, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity() 
         self.blocks = nn.ModuleList([Block(**default_cfg) for _ in range(num_layers)])
-
+        #self.blocks = None
         self.proj_to_3d = nn.Linear(embed_dim, 3)
 
 
@@ -709,8 +711,9 @@ class Decoder(nn.Module):
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             # check if we need to mask the padded particles here.
             x = self.embed(x)
-            for block in self.blocks:
-                x = block(x)
+            if self.blocks is not None:
+                for block in self.blocks:
+                    x = block(x)
             x = self.proj_to_3d(x)
             x = x.permute(1, 0, 2)
             return x
@@ -720,14 +723,14 @@ class TAE(nn.Module):
     def __init__(self, encoder_cfg, decoder_cfg, **kwargs):
         super().__init__(**kwargs)
         self.encoder = Encoder(**encoder_cfg)
-        #self.decoder = Decoder(**decoder_cfg)
+        self.decoder = Decoder(**decoder_cfg)
 
     def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, graph=None, pr=False):
         x = self.encoder(x, v, mask, uu, uu_idx, graph, pr)
         #print(f'after encoder')
         #print(f'x.shape: {x.shape}')
-        x = x.permute(0, 2, 1)
-        #x = self.decoder(x, pr)
+        #x = x.permute(0, 2, 1)
+        x = self.decoder(x, pr)
         #print(f'after decoder')
         #print(f'x.shape: {x.shape}')
         #time.sleep(2)

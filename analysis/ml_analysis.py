@@ -24,7 +24,7 @@ class MLAnalysis(common_base.CommonBase):
     #---------------------------------------------------------------
     # Constructor
     #---------------------------------------------------------------
-    def __init__(self, config_file='', output_dir='', ddp=False, models = None, ext_plot=False, **kwargs):
+    def __init__(self, config_file='', output_dir='', ddp=False, models = None, ext_plot=False, n_part=-1, **kwargs):
         super(common_base.CommonBase, self).__init__(**kwargs)
         
         self.config_file = config_file
@@ -32,7 +32,7 @@ class MLAnalysis(common_base.CommonBase):
         self.ddp = ddp  
         self.models = models
         self.ext_plot = ext_plot
-        
+        self.n_part = n_part
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
         
@@ -43,6 +43,7 @@ class MLAnalysis(common_base.CommonBase):
         os.environ['TORCH'] = torch.__version__
         self.rank = int(os.getenv("LOCAL_RANK", "0"))
         self.torch_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         if self.rank == 0:
             print()
             print(f'pytorch version: {torch.__version__}')
@@ -68,7 +69,6 @@ class MLAnalysis(common_base.CommonBase):
         with open(self.config_file, 'r') as stream:
           config = yaml.safe_load(stream)   
         
-        self.n_part = config['n_part']
         self.n_train = config['n_train']
         self.n_val = config['n_val']
         self.n_test = config['n_test']
@@ -133,7 +133,7 @@ class MLAnalysis(common_base.CommonBase):
 
                     model = gae_train.gae(model_info).train()
                     
-                    self.AUC = ml_anomaly.anomaly(model, model_info).run()
+                    ml_anomaly.anomaly(model, model_info).run()
 
 
 

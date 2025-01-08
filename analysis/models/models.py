@@ -14,20 +14,24 @@ from models.layers import GraphConvolution
 
 # GNN AE using EdgeConv (mean aggregation graph operation). Basic GAE model.
 class EdgeNet(nn.Module):
-    def __init__(self, input_dim=4, big_dim=32, hidden_dim=2, aggr='mean'):
+    def __init__(self, input_dim=4, big_dim=32, hidden_dim=2, aggr='mean', dropout_rate=0.1):
         super(EdgeNet, self).__init__()
         encoder_nn = nn.Sequential(nn.Linear(2*(input_dim), big_dim),
                                nn.ReLU(),
+                               nn.Dropout(p=dropout_rate), 
                                nn.Linear(big_dim, big_dim),
                                nn.ReLU(),
+                               nn.Dropout(p=dropout_rate), 
                                nn.Linear(big_dim, hidden_dim),
                                nn.ReLU(),
         )
         
         decoder_nn = nn.Sequential(nn.Linear(2*(hidden_dim), big_dim),
                                nn.ReLU(),
+                               nn.Dropout(p=dropout_rate), 
                                nn.Linear(big_dim, big_dim),
                                nn.ReLU(),
+                               nn.Dropout(p=dropout_rate), 
                                nn.Linear(big_dim, input_dim)
         )
         

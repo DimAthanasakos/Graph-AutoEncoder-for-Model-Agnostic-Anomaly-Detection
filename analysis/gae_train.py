@@ -31,6 +31,9 @@ import networkx
 import energyflow as ef 
 import random
 
+import h5py 
+
+
 
 class gae(): 
     def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_test'):
@@ -44,7 +47,6 @@ class gae():
         self.ext_plot = model_info['ext_plot']
         if not os.path.exists(plot_path):
             os.makedirs(plot_path)
-
         if self.ddp: 
             self.rank = int(os.getenv("LOCAL_RANK"))
             # initialize the process group and set a timeout of 70 minutes, so that the process does not terminate
@@ -70,6 +72,7 @@ class gae():
         self.n_train = model_info['n_train']
         self.n_test = model_info['n_test']
         self.n_val = model_info['n_val'] 
+        self.n_part = model_info['n_part']
         self.batch_size = self.model_info['model_settings']['batch_size']
         self.patience = self.model_info['model_settings']['patience']
         self.lossname = self.model_info['model_settings']['lossname']
@@ -81,12 +84,29 @@ class gae():
         # Use custon training parameters
         self.epochs = self.model_info['model_settings']['epochs']
         self.learning_rate = self.model_info['model_settings']['learning_rate']
+        
+        self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
+        if not os.path.exists(self.plot_path):
+            os.makedirs(self.plot_path)
 
         self.train_loader, self.val_loader, self.test_loader = self.init_data()
 
         self.model = self.init_model().to(self.torch_device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr = self.learning_rate)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=self.patience, verbose=True)
+        #self.optimizer = torch.optim.Adam(self.model.parameters(), lr = self.learning_rate)
+        #self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.33, patience=self.patience, verbose=True)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.learning_rate,  # Initial learning rate (e.g., 1e-3)
+            weight_decay=0.01  # Regularization to reduce overfitting
+        )
+
+        # Cosine Annealing Scheduler
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=len(self.train_loader) * self.epochs,  # Total number of iterations (epochs x steps per epoch)
+            eta_min=1e-6  # Minimum learning rate at the end of annealing
+        )
+
         if self.ddp:
             self.model = DDP(self.model, device_ids=[self.rank], output_device=self.rank,)
             #self.batch_size = self.batch_size // torch.cuda.device_count()
@@ -141,6 +161,10 @@ class gae():
 
         else: sys.exit(f'Error: model {model_to_choose} not recognized.') 
 
+        # ==================================================
+        #model = torch.compile(model)
+        # ==================================================
+
         # Print the model architecture if master process
         if self.rank == 0:
             print()
@@ -171,20 +195,22 @@ class gae():
             
             if epoch%4==0 or self.ext_plot:
                 AUC = ml_anomaly.anomaly(self.model, self.model_info, plot=False).run()
+                actual_train_loss = self._test_loop(self.train_loader,)
+                print(f'actual_train_loss={actual_train_loss:.5f}')
                 self.auc_list.append(AUC)
-                self.train_loss_list.append(loss_train)
+                self.train_loss_list.append(actual_train_loss)
                 self.val_loss_list.append(loss_val)
 
             # only print if its the main process
             if self.rank == 0:
-                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.4f}, Time: {time.time() - t_start:.1f} sec')
+                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.5f}, Time: {time.time() - t_start:.1f} sec')
                 print("--------------------------------")
                 
             if loss_val < best_val_loss:
                 best_val_loss = loss_val
                 torch.save(self.model.state_dict(), best_model_path)
             
-            self.scheduler.step(loss_val)
+            #self.scheduler.step(loss_val)
 
 
         # lets plot the loss distribution of the test set
@@ -220,7 +246,7 @@ class gae():
             out0 = self.model(batch_jets0)
             out1 = self.model(batch_jets1)
             #print(f'out0.shape: {out0.shape}')
-            if batch_idx==0 and ep%4==0:
+            if batch_idx==0 and ep%4==-1:
                 n_print = min(2, length)
                 values_to_match = torch.arange(0, n_print, device=batch_jets0.batch.device)  # Values from 0 to n_print-1
                 mask0 = (batch_jets0.batch.unsqueeze(1) == values_to_match).any(dim=1)
@@ -256,6 +282,8 @@ class gae():
 
             loss.backward()
             self.optimizer.step()
+            self.scheduler.step()
+
             loss_cum += loss.item() * length
             count += length
             # Cache management
@@ -373,8 +401,8 @@ class gae():
             ax1.plot(epochs, self.train_loss_list, color='red', label='Train Loss', marker='o', linestyle='-')
             ax1.set_ylabel('Loss', color='black', fontsize='large')
             ax1.set_xlabel('epochs', fontsize='large')
-            ax1.set_title('Loss Distribution and AUC', fontsize='x-large')
-            ax1.set_ylim(0.01, 0.15)
+            ax1.set_title(f'Loss Distribution and AUC, GCN, n_part = {self.n_part}', fontsize='x-large')
+            ax1.set_ylim(0.009, 0.07)
             ax1.grid()
             
 
@@ -385,15 +413,23 @@ class gae():
             ax2.set_ylabel('AUC', color='black', fontsize='large')
             ax2.tick_params(axis='y', labelcolor='black', labelsize='medium')
             # Scale the AUC axis to the range 0.5 to 1
-            ax2.set_ylim(0.7, 0.85)
+            ax2.set_ylim(0.775, 0.845)
             ax2.grid()
 
             # Add legend for AUC
-            fig.legend(loc='center right', fontsize='large', frameon=True, shadow=True, borderpad=1)
+            fig.legend(loc='center', bbox_to_anchor=(0.77, 0.5), fontsize='large', frameon=True, shadow=True, borderpad=1)
 
             # Save the figure
             plt.tight_layout()
             plt.savefig(plot_file)
             plt.close()     
+
+            # Save the data to an HDF5 file
+            h5_file = os.path.join('/pscratch/sd/d/dimathan/LHCO/GAE', f'loss_and_auc_data_gae_e{len(self.auc_list)}_n{self.n_part}.h5')
+            with h5py.File(h5_file, 'w') as h5f:
+                h5f.create_dataset('train_loss', data=self.train_loss_list)
+                h5f.create_dataset('val_loss', data=self.val_loss_list)
+                h5f.create_dataset('auc', data=self.auc_list)
+
                
         return quantiles_loss

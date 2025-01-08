@@ -47,6 +47,17 @@ class anomaly():
 
         self.n_bkg = model_info['model_settings']['n_bkg']
         self.n_sig = model_info['model_settings']['n_sig']
+        
+        # parameters needed to just to set the path for the plots 
+        self.n_train = model_info['n_train']
+        self.n_part = model_info['n_part']
+        self.epochs = self.model_info['model_settings']['epochs']
+        self.learning_rate = self.model_info['model_settings']['learning_rate']
+
+        self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
+        if not os.path.exists(self.plot_path):
+            os.makedirs(self.plot_path)
+
         self.lossname = self.model_info['model_settings']['lossname']
         self.batch_size = self.model_info['model_settings']['batch_size']
 

@@ -30,6 +30,10 @@ from torch.utils.data.distributed import DistributedSampler
 from torch_scatter import scatter_mean
 from sklearn.metrics import roc_curve, auc
 
+# Enable high precision for float32 matmul
+torch.set_float32_matmul_precision('high')
+
+
 import utils
 
 import networkx
@@ -37,6 +41,7 @@ import energyflow
 from analysis.models import transformer_gae
   
 import random
+import h5py 
 
 
 
@@ -845,7 +850,7 @@ def to_ptrapphim(x, eps=1e-8):
 class ParT():
     
     #---------------------------------------------------------------
-    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plots_test'):
+    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plots_test2'):
         '''
         :param model_info: Dictionary of model info, containing the following keys:
                                 'model_settings': dictionary of model settings
@@ -869,6 +874,7 @@ class ParT():
         self.plot_path = plot_path
         if not os.path.exists(plot_path):
             os.makedirs(plot_path)
+        self.ext_plot = model_info['ext_plot']
 
         if self.set_ddp: 
             self.local_rank = int(os.getenv("LOCAL_RANK"))
@@ -924,9 +930,14 @@ class ParT():
         self.epochs = self.model_info['model_settings']['epochs']
         self.learning_rate = self.model_info['model_settings']['learning_rate']        
         if self.set_ddp and self.local_rank == 0:
-            self.learning_rate = self.learning_rate * torch.cuda.device_count() # Adjust learning rate for DDP
+            self.learning_rate = self.learning_rate #* torch.cuda.device_count() # Adjust learning rate for DDP
+            self.batch_size = self.batch_size // torch.cuda.device_count()
             print(f'for ddp training with {torch.cuda.device_count()} GPUs, the learning rate is adjusted accordingly.')
 
+        self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
+        if self.local_rank == 0:
+            if not os.path.exists(self.plot_path):
+                os.makedirs(self.plot_path)
 
         # Default values:            
         self.graph_transformer = False
@@ -1229,8 +1240,11 @@ class ParT():
         dec_cfg = dict()
         model = transformer_gae.TAE(enc_cfg, dec_cfg) # 4 features: (px, py, pz, E)
         
+        # ==================================================
+        model = torch.compile(model)
+        # ==================================================
+        
         model = model.to(self.torch_device)
-        #model = torch.compile(model)
         
         # Print the model architecture if master process
         if self.local_rank == 0:
@@ -1255,12 +1269,39 @@ class ParT():
 
         time_start = time.time()
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr = self.learning_rate)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=self.patience, verbose=True)
+        #self.optimizer = torch.optim.Adam(self.model.parameters(), lr = self.learning_rate)
+        #self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.33, patience=self.patience, verbose=True)
+        # Optimizer
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.learning_rate,  # Initial learning rate (use a smaller value, e.g., 1e-4 or 5e-5)
+            weight_decay=0.01  # Regularization to reduce overfitting
+        )
+
+        # Scheduler
+        num_training_steps = len(self.train_loader) * self.epochs  # Total number of training steps
+        num_warmup_steps = int(0.2 * num_training_steps)  # Warmup for 20% of training steps
+
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=self.learning_rate,  # Peak learning rate during warmup
+            total_steps=num_training_steps,
+            anneal_strategy='linear',  # Linearly decay the learning rate after warmup
+            pct_start=num_warmup_steps / num_training_steps,  # Proportion of warmup steps
+            div_factor=20.0,  # Initial LR is 1/10th of max_lr
+            final_div_factor=10.0  # Final LR is 1/5th of max_lr
+        )
+
+
+
 
         best_val_loss = math.inf        
         best_model_path = os.path.join(self.output_dir, 'tae_best.pt')  # Path for saving the best model
-
+        
+        self.auc_list = []
+        self.train_loss_list = []
+        self.val_loss_list = []
+        
         if self.set_ddp:
             torch.cuda.set_device(self.local_rank)
             self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model) # SyncBatchNorm for DDP, else it will throw an error due to inplace operations in encoder-decoder
@@ -1272,13 +1313,19 @@ class ParT():
 
             t_start = time.time()
             loss_train = self._train_part(epoch)
-            loss_test = self._test_part(self.test_loader,)
-            loss_val = self._test_part(self.val_loader, )
-            #f_loss_train = self._test_part(self.train_loader, )
-            if self.local_rank == 0 and epoch%4==0:
-                self.run_anomaly(plot=False, ep=epoch)
             
             if self.local_rank == 0:
+                loss_test = self._test_part(self.test_loader,)
+                loss_val = self._test_part(self.val_loader, )
+                if epoch%4==0 or self.ext_plot:
+                    auc = self.run_anomaly(plot=False, ep=epoch)
+                    actual_train_loss = self._test_part(self.train_loader, )
+                    print(f'actual_train_loss={actual_train_loss:.4f}')
+                    self.auc_list.append(auc)
+                    self.train_loss_list.append(actual_train_loss)
+                    self.val_loss_list.append(loss_val)
+            
+            
                 # Save the model with the best test AUC
                 if loss_val < best_val_loss:
                     best_val_loss = loss_val
@@ -1286,18 +1333,12 @@ class ParT():
 
                 print("--------------------------------")
                 print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.5f}, Time: {time.time() - t_start:.1f} sec')
-            self.scheduler.step(loss_val)
-
-        # lets plot the loss distribution of the test set
-        if self.local_rank == 0:            
-            print(f'--------------------------------')
-            print(f'Finished training')
-            print()
-            self._plot_loss()
-
-        # Synchronize all processes before loading the model
-        if self.set_ddp:
-            dist.barrier()  # Ensures all processes finish training before proceeding
+            
+            #self.scheduler.step(loss_val)
+                
+            # Synchronize all processes 
+            if self.set_ddp:
+                dist.barrier()  # Ensures all processes finish training before proceeding
 
         # Load the best model before returning
         self.model.load_state_dict(torch.load(best_model_path))  # Load best model's state_dict
@@ -1307,6 +1348,16 @@ class ParT():
             loss_test = self._test_part(self.test_loader,)
             print(f'Best model validation loss: {loss_val:.4f}')
             print(f'Best model test loss: {loss_test:.4f}')
+
+            # lets plot the loss distribution of the test set
+            print(f'--------------------------------')
+            print(f'Finished training')
+            print()
+            self._plot_loss()
+
+        # Synchronize all processes before loading the model
+        #if self.set_ddp:
+        #    dist.barrier()  # Ensures all processes finish training before proceeding
 
 
         return self.model
@@ -1372,18 +1423,19 @@ class ParT():
             #    print(f'Index: {index}, loss: {loss.item()}')
             loss.backward()
             self.optimizer.step()
+            self.scheduler.step() # Update learning rate based on each training step, not each epoch
 
             loss_cum += loss.item()*length
             count += length
 
-            if index == 0 and self.local_rank == 0 and ep%1==0:
+            if index == 0 and self.local_rank == 0 and ep%4==-1:
                 # Avoid division by zero: Create a mask where p3_0 is non-zero
                 residual = p3_0 - out0  
                 nonzero_mask = (p3_0 != 0)
                 
                 l = torch.nn.MSELoss(reduction='none')(out0, p3_0)
                 l_clamped = torch.clamp(l, min=-3, max=3)
-                l_clamped = torch.round(l_clamped*100)/100
+                l_clamped = torch.round(l_clamped*1000)/1000
 
                 print(f'l.shape: {l.shape}')
 
@@ -1400,7 +1452,6 @@ class ParT():
                 l_node = l.mean(dim=-1)
                 l_graph = l_node.mean(dim=-1)
 
-            
             # Cache management
             torch.cuda.empty_cache()
             
@@ -1449,8 +1500,8 @@ class ParT():
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
             
-            loss0 = self.criterion(out0, p3_0)  * 100
-            loss1 = self.criterion(out1, p3_1)  * 100
+            loss0 = self.criterion(out0, p3_0) 
+            loss1 = self.criterion(out1, p3_1) 
             loss = loss0 + loss1
 
             loss_cum += loss.item()*length
@@ -1504,8 +1555,8 @@ class ParT():
                 p3_1 = p3_1.permute(0, 2, 1)
 
                 # 1) Nodewise loss => shape [N, F]
-                loss0_nodewise = criterion_node(out0, p3_0)  * 100
-                loss1_nodewise = criterion_node(out1, p3_1)  * 100
+                loss0_nodewise = criterion_node(out0, p3_0)  
+                loss1_nodewise = criterion_node(out1, p3_1)   
 
                 # 2) Average across features => shape [N]
                 loss0_per_node = loss0_nodewise.mean(dim=-1)
@@ -1559,6 +1610,53 @@ class ParT():
         print(f"Saved loss distribution plot to: {plot_file}")
         print()
 
+        if self.ext_plot:
+            print(f'--------------------------------')
+            print(f'Plotting extended plots...')
+            print()
+            
+            # Plot the loss distribution of train and val with the AUC for each epoch
+            plot_file = os.path.join(self.plot_path, 'auc_vs_loss_distribution.pdf')
+            fig, ax1 = plt.subplots(figsize=(8, 6))
+
+            # Plot the loss distributions
+            epochs = range(1, len(self.auc_list) + 1)
+            ax1.plot(epochs, self.val_loss_list, color='blue', label='Val Loss', marker='o', linestyle='-')
+            ax1.plot(epochs, self.train_loss_list, color='red', label='Train Loss', marker='o', linestyle='-')
+            ax1.set_ylabel('Loss', color='black', fontsize='large')
+            ax1.set_xlabel('epochs', fontsize='large')
+            ax1.set_title(f'Loss Distribution and AUC, Transformer, n_part = {self.n_part}', fontsize='x-large')
+            ax1.set_ylim(0.007, 0.07)
+            ax1.grid()
+            
+
+            # Add the secondary y-axis for AUC
+            ax2 = ax1.twinx()
+            print(f'self.auc_list: {self.auc_list}')
+            ax2.plot(epochs, self.auc_list, color='darkgreen', label='AUC', marker='o', linestyle='-')
+            ax2.set_ylabel('AUC', color='black', fontsize='large')
+            ax2.tick_params(axis='y', labelcolor='black', labelsize='medium')
+            # Scale the AUC axis to the range 0.5 to 1
+            ax2.set_ylim(0.795, 0.865)
+            ax2.grid()
+
+            # Add legend for AUC
+            fig.legend(loc='center', bbox_to_anchor=(0.77, 0.5), fontsize='large', frameon=True, shadow=True, borderpad=1)
+
+            # Save the figure
+            plt.tight_layout()
+            plt.savefig(plot_file)
+            plt.close()     
+
+            # Save the data to an HDF5 file
+            h5_file = os.path.join('/pscratch/sd/d/dimathan/LHCO/GAE', f'loss_and_auc_data_trans_e{len(self.auc_list)}_n{self.n_part}.h5')
+            with h5py.File(h5_file, 'w') as h5f:
+                h5f.create_dataset('train_loss', data=self.train_loss_list)
+                h5f.create_dataset('val_loss', data=self.val_loss_list)
+                h5f.create_dataset('auc', data=self.auc_list)
+
+            print(f"Saved loss and AUC data to: {h5_file}")
+
         return quantiles_loss
 
 
@@ -1610,7 +1708,7 @@ class ParT():
                     p3_0 = p3_0.permute(0, 2, 1)
                     p3_1 = p3_1.permute(0, 2, 1)
 
-                    if index == 0 and self.local_rank == 0 and ep%5==0:
+                    if index == 0 and self.local_rank == 0 and ep%5==-1:
                         # Avoid division by zero: Create a mask where p3_0 is non-zero
                         residual = p3_0 - out0  
                         nonzero_mask = (p3_0 != 0)
@@ -1620,7 +1718,7 @@ class ParT():
                         scaled_residual[nonzero_mask] = residual[nonzero_mask] / p3_0[nonzero_mask]
                         # Clip scaled_residual to [-1, 1]
                         scaled_residual = torch.clamp(scaled_residual, min=-1, max=1)
-                        scaled_residual = torch.round(scaled_residual*100)/100
+                        scaled_residual = torch.round(scaled_residual*1000)/1000
 
 
                         print(f'===============')
@@ -1639,8 +1737,8 @@ class ParT():
                         print(f'===============')
 
                     # 1) Nodewise loss => shape [N, F]
-                    loss0_nodewise = criterion_node(out0, p3_0) * 100
-                    loss1_nodewise = criterion_node(out1, p3_1) * 100
+                    loss0_nodewise = criterion_node(out0, p3_0) 
+                    loss1_nodewise = criterion_node(out1, p3_1) 
 
                     # 2) Average across features => shape [N]
                     loss0_per_node = loss0_nodewise.mean(dim=-1)
@@ -1693,8 +1791,8 @@ class ParT():
 
 
                 # Compute the 99th percentile for both distributions
-                p99_normal = np.percentile(normal_scores, 99)
-                p99_anomalous = np.percentile(anomalous_scores, 99)
+                p99_normal = np.percentile(normal_scores, 95)
+                p99_anomalous = np.percentile(anomalous_scores, 95)
 
                 # Determine the x-axis limit (max of the two 95th percentiles)
                 x_max = max(p99_normal, p99_anomalous)
@@ -1710,8 +1808,8 @@ class ParT():
 
                 plt.figure(figsize=(6, 5))
                 # density=True => each histogram integrates to 1, letting you compare shapes
-                plt.hist(normal_scores, bins=bin_edges, label="Normal (label=0)", color="green", histtype='step', density=True)
-                plt.hist(anomalous_scores, bins=bin_edges, label="Anomalous (label=1)", color="red", histtype='step', density=True)
+                plt.hist(normal_scores, bins=bin_edges, label="Background (label=0)", color="green", histtype='step', density=True)
+                plt.hist(anomalous_scores, bins=bin_edges, label="Signal (label=1)", color="red", histtype='step', density=True)
 
                 plt.xlabel("Loss Score")
                 plt.xlim(0, x_max)
@@ -1723,6 +1821,5 @@ class ParT():
                 plt.savefig(dist_plot_file, dpi=300)
                 plt.close()
                 print(f"Saved loss distribution plot to: {dist_plot_file}")
-                return auc_val
             
-        return None
+            return auc_val
