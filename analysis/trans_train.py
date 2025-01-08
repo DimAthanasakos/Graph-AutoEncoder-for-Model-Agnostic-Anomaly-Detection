@@ -560,24 +560,31 @@ def laman_knn(x, angles = 0, extra_info = False):
     else: 
         device  = x.device
 
+    batch_size, _, _, num_particles = x.size()
+    x = x.reshape(2*batch_size, -1, num_particles)
+
+    batch_size = 2*batch_size  # effective batch size
+
     non_zero_particles = torch.norm(x, p=2, dim=1) != 0
     valid_n = non_zero_particles.sum(axis = 1)
 
     
     t_start = time.time()
-    batch_size, _, num_particles = x.size()
-    px, py, pz, energy = x.split((1, 1, 1, 1), dim=1)
 
-    rapidity = 0.5 * torch.log(1 + (2 * pz) / (energy - pz).clamp(min=1e-20))
-    phi = torch.atan2(py, px)
+    pt, rapidity, phi, = x.split((1, 1, 1), dim=1)
+
+    #rapidity = 0.5 * torch.log(1 + (2 * pz) / (energy - pz).clamp(min=1e-20))
+    #phi = torch.atan2(py, px)
     
     x = torch.cat((rapidity, phi), dim=1) # (batch_size, 2, num_points)
+
     #print()
     #print(f'time to calculate padded particles, rapidity and phi = {time.time() - t_start:.3f}')
     t_pairwise = time.time()
     inner = -2 * torch.matmul(x.transpose(2, 1), x)                                    # x.transpose(2, 1): flips the last two dimensions
     xx = torch.sum(x ** 2, dim=1, keepdim=True)
     pairwise_distance = -xx - inner - xx.transpose(2, 1)                               # (batch_size, num_points, num_points)
+    
     #print(f'time to calculate pairwise distance = {time.time() - t_pairwise:.3f}')
     #print()
     #print(f'pairwise_distance.device = {pairwise_distance.device}')
@@ -602,14 +609,15 @@ def laman_knn(x, angles = 0, extra_info = False):
     #print(f'time to calculate knn = {time.time() - time_knn:.3f}')
     t_idx = time.time()
     idx = idx[1] # (batch_size, num_points - 3, 2)
-        
+
     # Concatenate idx and idx_3 to get the indices of the 3 hardest particles and the 2 nearest neighbors for the rest of the particles
     idx = torch.cat((idx_3[1], idx), dim=1) # (batch_size, num_points, 3)
-    
+
     # add 3 rows of -inf to the top of the pairwise_distance tensor to make it of shape (batch_size, num_particles, num_particles)
     # this is because we remove the 3 hardest particles from the graph and we don't want to connect them to the rest of the particles
     #print(f'pairwise_distance.device = {pairwise_distance.device}')
     pairwise_distance = torch.cat((torch.ones((batch_size, 3, num_particles), device = device)*float('-inf'), pairwise_distance), dim=1)
+
     #print(f'time to create idx = {time.time() - t_idx:.3f}')
 
     # Initialize a boolean mask with False (indicating no connection) for all pairs
@@ -639,6 +647,7 @@ def laman_knn(x, angles = 0, extra_info = False):
     mask = (range_tensor >= expanded_valid_n).to(device)
     final_mask = mask | mask.transpose(1, 2)
 
+
     bool_mask = bool_mask & ~final_mask
     #print(f'time to remove padded particles = {time.time() - t_memory:.3f}')
     t_end = time.time()
@@ -659,6 +668,9 @@ def laman_knn(x, angles = 0, extra_info = False):
         shannon_entropy(bool_mask, x)
     #print(f'time to construct laman knn graph = {time.time() - t_start:.3f}')
     #print()
+
+    bool_mask=bool_mask.reshape(-1, 2, num_particles, num_particles)
+
     return bool_mask 
 
 
@@ -1190,7 +1202,8 @@ class ParT():
                 elif self.graph_type == 'laman_knn_graph': 
                     print('Constructing a Laman Graph using a mod of the k nearest neighbors algorithm.')
                     graph = torch.cat([laman_knn(X[i * chunk_size:(i + 1) * chunk_size], angles = self.add_angles, extra_info=True if i==0 else False) for i in range(chunks)])
-
+                    #graph = laman_knn(X, angles = self.add_angles, extra_info=True)
+                    #print(f'graph.shape: {graph.shape}')
                 elif self.graph_type == '2n3_nearest_neighbors': 
                     graph = np.concatenate([nearest_neighbors(X[i * chunk_size:(i + 1) * chunk_size]) for i in range(chunks)] ) 
                     
@@ -1209,7 +1222,8 @@ class ParT():
                     sys.exit("Invalid graph type for Laman Graphs. Choose between 'laman_random_graph', 'laman_knn_graph, '2n3_nearest_neighbors', 'knn_graph' and 'unique_graph'") 
 
                 print(f"Time to create the graph = {time.time() - t_st} seconds")
-             
+            
+            Y = np.array(Y) # cause we've defined Y as a python list
             if not train: # classification 
                 return X, Y, graph
             
@@ -1382,9 +1396,11 @@ class ParT():
             jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
             length = jet0.shape[0]
 
-            if self.graph_transformer: graph = data[2].to(self.torch_device)
-            else:  graph = None
-            
+            if self.graph_transformer: 
+                graph = data[2].to(self.torch_device)
+                graph0, graph1 = graph[:, 0, :, :], graph[:, 1, :, :]
+            else:  graph0, graph1 = None, None
+            graph0, graph1 = None, None
             # zero the parameter gradients
             self.optimizer.zero_grad()
 
@@ -1409,8 +1425,8 @@ class ParT():
             #print(f'p3_0.shape: {p3_0.shape}')
             # forward + backward + optimize
 
-            out0 = self.model(x = x0, v = jet0, graph = graph,) # pr=True if index==0 else False)
-            out1 = self.model(x = x1, v = jet1, graph = graph)
+            out0 = self.model(x = x0, v = jet0, graph = graph0,) # pr=True if index==0 else False)
+            out1 = self.model(x = x1, v = jet1, graph = graph1)
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
             jet0 = jet0.permute(0, 2, 1)
@@ -1473,8 +1489,10 @@ class ParT():
             length = jet0.shape[0]
 
 
-            if self.graph_transformer: graph = data[2].to(self.torch_device)
-            else:  graph = None
+            if self.graph_transformer: 
+                graph = data[2].to(self.torch_device)
+                graph0, graph1 = graph[:, 0, :, :], graph[:, 1, :, :]
+            else:   graph0, graph1 = None, None
             
             # zero the parameter gradients
             self.optimizer.zero_grad()
@@ -1495,8 +1513,8 @@ class ParT():
             else:
                 x0, x1 = jet0, jet1
 
-            out0 = self.model(x = x0, v = jet0, graph = graph) 
-            out1 = self.model(x = x1, v = jet1, graph = graph) 
+            out0 = self.model(x = x0, v = jet0, graph = graph0) 
+            out1 = self.model(x = x1, v = jet1, graph = graph1) 
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
             
@@ -1527,8 +1545,10 @@ class ParT():
                 length = jet0.shape[0]
 
 
-                if self.graph_transformer: graph = data[2].to(self.torch_device)
-                else:  graph = None
+                if self.graph_transformer: 
+                    graph = data[2].to(self.torch_device)
+                    graph0, graph1 = graph[:, 0, :, :], graph[:, 1, :, :]
+                else:   graph0, graph1 = None, None
                 
                 # zero the parameter gradients
                 self.optimizer.zero_grad()
@@ -1549,8 +1569,8 @@ class ParT():
                 else:
                     x0, x1 = jet0, jet1
 
-                out0 = self.model(x = x0, v = jet0, graph = graph)
-                out1 = self.model(x = x1, v = jet1, graph = graph) 
+                out0 = self.model(x = x0, v = jet0, graph = graph0)
+                out1 = self.model(x = x1, v = jet1, graph = graph1) 
                 p3_0 = p3_0.permute(0, 2, 1)
                 p3_1 = p3_1.permute(0, 2, 1)
 
@@ -1681,8 +1701,10 @@ class ParT():
                     jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
                     length = jet0.shape[0]
 
-                    if self.graph_transformer: graph = data[2].to(self.torch_device)
-                    else:  graph = None
+                    if self.graph_transformer: 
+                        graph = data[2].to(self.torch_device)
+                        graph0, graph1 = graph[:, 0, :, :], graph[:, 1, :, :]
+                    else:   graph0, graph1 = None, None
                     
                     # zero the parameter gradients
                     self.optimizer.zero_grad()
@@ -1703,8 +1725,8 @@ class ParT():
                     else:
                         x0, x1 = jet0, jet1
  
-                    out0 = self.model(x = x0, v = jet0, graph = graph)  
-                    out1 = self.model(x = x1, v = jet1, graph = graph) 
+                    out0 = self.model(x = x0, v = jet0, graph = graph0)  
+                    out1 = self.model(x = x1, v = jet1, graph = graph1) 
                     p3_0 = p3_0.permute(0, 2, 1)
                     p3_1 = p3_1.permute(0, 2, 1)
 

@@ -529,11 +529,11 @@ class Encoder(nn.Module):
                  pair_extra_dim=0, # ?
                  remove_self_pair=False,
                  use_pre_activation_pair=True,
-                 embed_dims=[32, 64, 64], #[8,], #[128, 512, 128],   # the MLP for transforming the particle features input 
+                 embed_dims=[32, 32],# 64, #[8,], #[128, 512, 128],   # the MLP for transforming the particle features input 
                  pair_embed_dims=[32, 32,], #64], # the MPL for transforming the pairwise features input, i.e. interactions. Note that later we add
                                                # one more layers to this to match the number of heads in the attention layer.
-                 num_heads=4,  # how many attention heads in each particle attention block
-                 num_layers=3, # how many particle attention blocks
+                 num_heads=2,  # how many attention heads in each particle attention block
+                 num_layers=2, # how many particle attention blocks
                  block_params=None,
                  activation='gelu',
                  # misc
@@ -572,7 +572,7 @@ class Encoder(nn.Module):
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,) if pair_embed_dims is not None and pair_input_dim + pair_extra_dim > 0 else None
         
-        #self.pair_embed = None
+        self.pair_embed = None
 
         self.blocks = nn.ModuleList([Block(**cfg_block) for _ in range(num_layers)])
         #self.blocks = None 
@@ -591,7 +591,7 @@ class Encoder(nn.Module):
             print(f'Encoder input shape: {x.shape}')
             print(f'x[:2,:,:5]: {x[:2,:,:5]}')
             print()
-
+        
         with torch.no_grad():
             if not self.for_inference: # if training 
                 if uu_idx is not None:
@@ -644,7 +644,7 @@ class Encoder(nn.Module):
                     print()
 
             # filter the attn_mask with the graph that was constructed in models.ParticleTransformer. Otherwise, full transformer is used.
-            if graph is not None:
+            if graph is not None and self.pair_embed is not None:
                 bool_mask =  graph.unsqueeze(1).repeat(1, self.num_heads, 1, 1).reshape(batch_size*self.num_heads, 
                                                                                         num_particles, num_particles).to(attn_mask.device)
                    
@@ -681,9 +681,9 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(self, 
-                 embed_dims=[32, 64, 64], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
-                 num_heads=4,  # how many attention heads in each particle attention block
-                 num_layers=3, # how many particle attention blocks
+                 embed_dims=[32, 32],# 64], #[128, 512, 128],   # the MLP for transforming the particle features from 2D (the output of the encoder)  
+                 num_heads=2,  # how many attention heads in each particle attention block
+                 num_layers=2, # how many particle attention blocks
                  activation='gelu',
                  use_amp=False,
                  **kwargs):
