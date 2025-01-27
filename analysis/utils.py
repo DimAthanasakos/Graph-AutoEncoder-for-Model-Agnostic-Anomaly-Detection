@@ -56,25 +56,30 @@ def SaveJson(save_file,data):
         json.dump(data, f)
 
 
-def _preprocessing(particles,jets,mjj,save_json=True, norm = 'mean'):
+def _preprocessing(particles,jets,mjj,save_json=True, norm = 'mean', extended = True):
     n_part = particles.shape[2]
     batch_size = particles.shape[0]
-
-    #return particles.astype(np.float32), jets.astype(np.float32) # the data is already preprocessed and normalized in the dataset
-    if False:
-        print(f'particles.shape: {particles.shape}')
-        for ps in particles:
-            print(f'ps.shape: {ps.shape}')
-            for p in ps:
-                print(f'p[:10]: {p[:10]}')
-                msk = p[:,0]>0 # mask for non-zero padded particles
-                yphi_avg = np.average(p[msk,1:3], weights=p[msk,0], axis=0)
-                p[msk,1:3] -= yphi_avg       # centralize phi and eta
-                p[msk,0] /= np.sum(p[msk,0]) # normalize pt
-                print(f'p[:10]: {p[:10]}')
-                print()
-            time.sleep(2.5)
-        return particles.astype(np.float32), jets.astype(np.float32)
+    print(f'particles.shape: {particles.shape}')
+    if not extended:
+        return particles.astype(np.float32), jets.astype(np.float32) # the data is already preprocessed and normalized in the dataset
+    else:
+        if False:
+            particles = particles[:, :, :, :3]
+            print(f'particles.shape: {particles.shape}')
+            for ps in particles:
+                print(f'ps.shape: {ps.shape}')
+                for p in ps:
+                    print(f'p.shape: {p.shape}')
+                    print(f'p[:5]: {p[:5]}')
+                    msk = p[:,0]>0 # mask for non-zero padded particles
+                    yphi_avg = np.average(p[msk,1:3], weights=p[msk,0], axis=0)
+                    p[msk,1:3] -= yphi_avg       # centralize phi and eta
+                    p[msk,0] /= np.sum(p[msk,0]) # normalize pt
+                    print(f'p[:5]: {p[:5]}')
+                    print()
+                    time.sleep(1.)
+            print(f'particles.shape: {particles.shape}')
+            return particles.astype(np.float32), jets.astype(np.float32)
 
     #jets[:,:,0] = jets[:,:,0]/np.expand_dims(mjj,-1)
     #jets[:,:,3] = jets[:,:,3]/np.expand_dims(mjj,-1)

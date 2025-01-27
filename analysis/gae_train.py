@@ -85,9 +85,10 @@ class gae():
         self.epochs = self.model_info['model_settings']['epochs']
         self.learning_rate = self.model_info['model_settings']['learning_rate']
         
-        self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
-        if not os.path.exists(self.plot_path):
-            os.makedirs(self.plot_path)
+        if self.epochs > 20 and self.n_train > 10000: # otherwise its just testing, no need to store the plots on a permanent folder
+            self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
+            if not os.path.exists(self.plot_path):
+                os.makedirs(self.plot_path)
 
         self.train_loader, self.val_loader, self.test_loader = self.init_data()
 
@@ -162,7 +163,7 @@ class gae():
         else: sys.exit(f'Error: model {model_to_choose} not recognized.') 
 
         # ==================================================
-        #model = torch.compile(model)
+        model = torch.compile(model)
         # ==================================================
 
         # Print the model architecture if master process
@@ -193,7 +194,7 @@ class gae():
             loss_val = self._test_loop(self.val_loader,)
             loss_test = self._test_loop(self.test_loader,)
             
-            if epoch%4==0 or self.ext_plot:
+            if epoch%6==0 or self.ext_plot:
                 AUC = ml_anomaly.anomaly(self.model, self.model_info, plot=False).run()
                 actual_train_loss = self._test_loop(self.train_loader,)
                 print(f'actual_train_loss={actual_train_loss:.5f}')
@@ -246,13 +247,16 @@ class gae():
             out0 = self.model(batch_jets0)
             out1 = self.model(batch_jets1)
             #print(f'out0.shape: {out0.shape}')
-            if batch_idx==0 and ep%4==-1:
+            if batch_idx==0 and ep%1==-1:
                 n_print = min(2, length)
                 values_to_match = torch.arange(0, n_print, device=batch_jets0.batch.device)  # Values from 0 to n_print-1
                 mask0 = (batch_jets0.batch.unsqueeze(1) == values_to_match).any(dim=1)
                 #mask0 = (batch_jets0.batch == 0) | (batch_jets0.batch == 1)
                 in0 = batch_jets0.x[mask0].reshape(n_print, -1, 3)
                 out0_reshaped = out0.reshape(-1, in0.shape[1], 3)
+                in1 =  batch_jets1.x[mask0].reshape(n_print, -1, 3)
+                out1_reshaped = out1.reshape(-1, in1.shape[1], 3)
+
 
                 l = torch.nn.MSELoss(reduction='none')(out0, batch_jets0.x)
                 l = l.reshape(-1, in0.shape[1], 3)
@@ -263,18 +267,27 @@ class gae():
                 # 'batch_jets0.x' are the original input features for the same nodes.
                 # We'll just print a few rows (.head equivalent) for clarity:
                 print("=== First graph in the first batch of this epoch ===")
-                print(f'in0[:2, :5]:' )
-                print(in0[:2, :5])
+                print(f'in0[0, :5]:' )
+                print(in0[0, :5])
                 print()
                 print("====================================================\n")
-                print(f'out0_reshaped[:2,:5]:' )
-                print(out0_reshaped[:2,:5])
+                print(f'out0_reshaped[0,:5]:' )
+                print(out0_reshaped[0,:5])
                 print()
                 print("====================================================\n")
-                print(f'l_clamped[:2, :5]:' )
-                print(l_clamped[:2, :5])
+                print(f'l_clamped[0, :5]:' )
+                print(l_clamped[0, :5])
                 print()
                 print("====================================================\n")
+                print(f'in1[0, :5]:' )
+                print(in1[0, :5])
+                print()
+                print("====================================================\n")
+                print(f'out1_reshaped[0,:5]:' )
+                print(out1_reshaped[0,:5])
+                print()
+                print("====================================================\n")
+
 
             loss0 = self.criterion(out0, batch_jets0.x)   # multiply by 100 to scale the loss
             loss1 = self.criterion(out1, batch_jets1.x)  

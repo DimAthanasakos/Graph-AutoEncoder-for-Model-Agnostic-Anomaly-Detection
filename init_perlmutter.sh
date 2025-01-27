@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 # Load pytorch w/GPU support
-module load pytorch/2.1.0-cu12 
+module load pytorch/2.3.1
 module list
 
 # Install additional packages
@@ -19,10 +19,10 @@ energyflow \
 vector \
 awkward \
 uproot \
-matplotlib==3.6.2 \
-mplhep==0.3.26 \
+matplotlib==3.7.2 \
+mplhep==0.3.31 \
 PyYAML==6.0.1 \
-torchinfo \
+torchinfo==1.8.0 \
 pyjet \
 coffea \
 qpth

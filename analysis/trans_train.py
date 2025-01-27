@@ -862,7 +862,7 @@ def to_ptrapphim(x, eps=1e-8):
 class ParT():
     
     #---------------------------------------------------------------
-    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plots_test2'):
+    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plots_test'):
         '''
         :param model_info: Dictionary of model info, containing the following keys:
                                 'model_settings': dictionary of model settings
@@ -946,10 +946,11 @@ class ParT():
             self.batch_size = self.batch_size // torch.cuda.device_count()
             print(f'for ddp training with {torch.cuda.device_count()} GPUs, the learning rate is adjusted accordingly.')
 
-        self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
-        if self.local_rank == 0:
-            if not os.path.exists(self.plot_path):
-                os.makedirs(self.plot_path)
+        if self.epochs > 20 and self.n_train > 10000: # otherwise its just testing, no need to store the plots on a permanent folder
+            self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
+            if self.local_rank == 0:
+                if not os.path.exists(self.plot_path):
+                    os.makedirs(self.plot_path)
 
         # Default values:            
         self.graph_transformer = False
@@ -1250,12 +1251,13 @@ class ParT():
         '''
 
         # Define the model 
-        enc_cfg = dict(input_dim = self.input_dim, pair_input_dim = self.pair_input_dim) 
-        dec_cfg = dict()
+        hidden_dim = 2
+        enc_cfg = dict(input_dim = self.input_dim, pair_input_dim = self.pair_input_dim, hidden_dim = hidden_dim)
+        dec_cfg = dict(hidden_dim = hidden_dim)
         model = transformer_gae.TAE(enc_cfg, dec_cfg) # 4 features: (px, py, pz, E)
         
         # ==================================================
-        model = torch.compile(model)
+        #model = torch.compile(model)
         # ==================================================
         
         model = model.to(self.torch_device)
@@ -1294,7 +1296,7 @@ class ParT():
 
         # Scheduler
         num_training_steps = len(self.train_loader) * self.epochs  # Total number of training steps
-        num_warmup_steps = int(0.2 * num_training_steps)  # Warmup for 20% of training steps
+        num_warmup_steps = int(0.05 * num_training_steps)  # Warmup for 20% of training steps
 
         self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
@@ -1302,11 +1304,9 @@ class ParT():
             total_steps=num_training_steps,
             anneal_strategy='linear',  # Linearly decay the learning rate after warmup
             pct_start=num_warmup_steps / num_training_steps,  # Proportion of warmup steps
-            div_factor=20.0,  # Initial LR is 1/10th of max_lr
-            final_div_factor=10.0  # Final LR is 1/5th of max_lr
+            div_factor=5.0,  # Initial LR is 1/10th of max_lr
+            final_div_factor=4.0  # Final LR is 1/5th of max_lr
         )
-
-
 
 
         best_val_loss = math.inf        
@@ -1381,7 +1381,6 @@ class ParT():
     #---------------------------------------------------------------
     def _train_part(self, ep=-1):
 
-
         self.model.train()        # Set model to training mode. This is necessary for dropout, batchnorm etc layers 
                                   # that behave differently in training mode vs eval mode (which is the default)
                                   # We need to include this since we have particlenet.eval() in the test_particlenet function
@@ -1413,6 +1412,19 @@ class ParT():
                 # create pt of each particle instead of (px, py, pz, E) for the input 
                 x0 = p3_0[:, 0, :].unsqueeze(1)
                 x1 = p3_1[:, 0, :].unsqueeze(1)
+                #print(f'x0.shape: {x0.shape}')
+            elif self.input_dim == 2:
+                # create pt of each particle instead of (px, py, pz, E) for the input 
+                x0 = p3_0[:, 0, :].unsqueeze(1)
+                x1 = p3_1[:, 0, :].unsqueeze(1)
+                #print(f'x0.shape: {x0.shape}')
+                # Create a zero tensor of the same size as x1
+                zero_tensor = torch.zeros_like(x1)  # Shape: [512, 1, 20]
+
+                # Concatenate x1 and the zero tensor along the last dimension
+                x0 = torch.cat((x0, zero_tensor), dim=-2)  # Shape: [512, 2, 20]
+                x1 = torch.cat((x1, zero_tensor), dim=-2)  # Shape: [512, 2, 20]
+
 
             elif self.input_dim == 3: 
                 x0 = p3_0
@@ -1425,15 +1437,15 @@ class ParT():
             #print(f'p3_0.shape: {p3_0.shape}')
             # forward + backward + optimize
 
-            out0 = self.model(x = x0, v = jet0, graph = graph0,) # pr=True if index==0 else False)
+            out0 = self.model(x = x0, v = jet0, graph = graph0, debug = False if index == 0 else False) # pr=True if index==0 else False)
             out1 = self.model(x = x1, v = jet1, graph = graph1)
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
             jet0 = jet0.permute(0, 2, 1)
             jet1 = jet1.permute(0, 2, 1)
-                            
-            loss0 = self.criterion(out0, p3_0)  
-            loss1 = self.criterion(out1, p3_1) 
+            
+            loss0 = self.criterion(out0, p3_0  )  
+            loss1 = self.criterion(out1, p3_1  )
             loss = loss0 + loss1
             #if self.local_rank == 0:
             #    print(f'Index: {index}, loss: {loss.item()}')
@@ -1444,7 +1456,7 @@ class ParT():
             loss_cum += loss.item()*length
             count += length
 
-            if index == 0 and self.local_rank == 0 and ep%4==-1:
+            if index == 0 and self.local_rank == 0 and ep%1==-1:
                 # Avoid division by zero: Create a mask where p3_0 is non-zero
                 residual = p3_0 - out0  
                 nonzero_mask = (p3_0 != 0)
@@ -1456,15 +1468,22 @@ class ParT():
                 print(f'l.shape: {l.shape}')
 
                 print(f'===============')
-                print(f'p3_0[:2, :5, :5]:')
-                print(p3_0[:1, :5, :5])
+                print(f'p3_0[0, :5, :5]:')
+                print(p3_0[0, :5, :5])
                 print("====================================================\n")
-                print(f'out0[:2, :5, :5]:')
-                print(out0[:1, :5, :5])
+                print(f'out0[0, :5, :5]:')
+                print(out0[0, :5, :5])
                 print("====================================================\n")
-                print(f'l_clamped[:2, :5]')
-                print(l_clamped[:1, :5])
+                print(f'l_clamped[0, :5]')
+                print(l_clamped[0, :5])
                 print("====================================================\n")
+                print(f'p3_1[0, :5, :5]:')
+                print(p3_1[0, :5, :5])
+                print("====================================================\n")
+                print(f'out1[0, :5, :5]:')
+                print(out1[0, :5, :5])
+                print("====================================================\n")
+
                 l_node = l.mean(dim=-1)
                 l_graph = l_node.mean(dim=-1)
 
@@ -1518,8 +1537,8 @@ class ParT():
             p3_0 = p3_0.permute(0, 2, 1)
             p3_1 = p3_1.permute(0, 2, 1)
             
-            loss0 = self.criterion(out0, p3_0) 
-            loss1 = self.criterion(out1, p3_1) 
+            loss0 = self.criterion(out0, p3_0  )
+            loss1 = self.criterion(out1, p3_1  )
             loss = loss0 + loss1
 
             loss_cum += loss.item()*length
@@ -1575,8 +1594,8 @@ class ParT():
                 p3_1 = p3_1.permute(0, 2, 1)
 
                 # 1) Nodewise loss => shape [N, F]
-                loss0_nodewise = criterion_node(out0, p3_0)  
-                loss1_nodewise = criterion_node(out1, p3_1)   
+                loss0_nodewise = criterion_node(out0, p3_0 )
+                loss1_nodewise = criterion_node(out1, p3_1 )
 
                 # 2) Average across features => shape [N]
                 loss0_per_node = loss0_nodewise.mean(dim=-1)
@@ -1646,7 +1665,7 @@ class ParT():
             ax1.set_ylabel('Loss', color='black', fontsize='large')
             ax1.set_xlabel('epochs', fontsize='large')
             ax1.set_title(f'Loss Distribution and AUC, Transformer, n_part = {self.n_part}', fontsize='x-large')
-            ax1.set_ylim(0.007, 0.07)
+            ax1.set_ylim(0.005, 0.03)
             ax1.grid()
             
 
@@ -1657,11 +1676,11 @@ class ParT():
             ax2.set_ylabel('AUC', color='black', fontsize='large')
             ax2.tick_params(axis='y', labelcolor='black', labelsize='medium')
             # Scale the AUC axis to the range 0.5 to 1
-            ax2.set_ylim(0.795, 0.865)
+            ax2.set_ylim(0.635, 0.865)
             ax2.grid()
 
             # Add legend for AUC
-            fig.legend(loc='center', bbox_to_anchor=(0.77, 0.5), fontsize='large', frameon=True, shadow=True, borderpad=1)
+            fig.legend(loc='center', bbox_to_anchor=(0.77, 0.85), fontsize='large', frameon=True, shadow=True, borderpad=1)
 
             # Save the figure
             plt.tight_layout()
@@ -1759,8 +1778,8 @@ class ParT():
                         print(f'===============')
 
                     # 1) Nodewise loss => shape [N, F]
-                    loss0_nodewise = criterion_node(out0, p3_0) 
-                    loss1_nodewise = criterion_node(out1, p3_1) 
+                    loss0_nodewise = criterion_node(out0, p3_0  )
+                    loss1_nodewise = criterion_node(out1, p3_1  )
 
                     # 2) Average across features => shape [N]
                     loss0_per_node = loss0_nodewise.mean(dim=-1)
