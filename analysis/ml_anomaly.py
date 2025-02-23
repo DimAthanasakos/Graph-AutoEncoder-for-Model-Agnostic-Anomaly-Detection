@@ -33,7 +33,7 @@ import random
 
 
 class anomaly():
-    def __init__(self, model, model_info, plot=True, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_test') -> None:
+    def __init__(self, model_info, plot=True, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_test') -> None:
         self.model_info = model_info
         self.path = model_info['path_SR'] # path to the data (pyg dataset)
         self.ddp = model_info['ddp']
@@ -53,6 +53,8 @@ class anomaly():
         self.n_part = model_info['n_part']
         self.epochs = self.model_info['model_settings']['epochs']
         self.learning_rate = self.model_info['model_settings']['learning_rate']
+        self.input_dim = self.model_info['model_settings']['input_dim']
+        
 
         self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
         if not os.path.exists(self.plot_path):
@@ -66,7 +68,6 @@ class anomaly():
 
 
         self.data_loader = self.init_data()
-        self.model = model
 
     #---------------------------------------------------------------
     def init_data(self):
@@ -80,10 +81,11 @@ class anomaly():
         return dataset
     
     #---------------------------------------------------------------
-    def run(self):
-        self.model.eval()
+    def run(self, model):
+        model.eval()
         # A nodewise criterion
         criterion_node = torch.nn.MSELoss(reduction='none')
+        criterion_edge = torch.nn.MSELoss(reduction='none')
 
         all_scores = []  # this will store the continuous anomaly score
         all_labels = []  # ground-truth anomaly labels (0 or 1)
@@ -92,32 +94,76 @@ class anomaly():
             for batch_jets0, batch_jets1 in self.data_loader:
                 batch_jets0 = batch_jets0.to(self.torch_device)
                 batch_jets1 = batch_jets1.to(self.torch_device)             
+                if self.input_dim ==  4:
+                    out1 = model(batch_jets0)
+                    out2 = model(batch_jets1)
 
-                out1 = self.model(batch_jets0)
-                out2 = self.model(batch_jets1)
+                    # 1) Nodewise loss => shape [N, F]
+                    loss1_nodewise = criterion_node(out1, batch_jets0.match) 
+                    loss2_nodewise = criterion_node(out2, batch_jets1.match)  
 
-                # 1) Nodewise loss => shape [N, F]
-                loss1_nodewise = criterion_node(out1, batch_jets0.x)
-                loss2_nodewise = criterion_node(out2, batch_jets1.x)
+                    # 2) Average across features => shape [N]
+                    loss1_per_node = loss1_nodewise.mean(dim=-1)
+                    loss2_per_node = loss2_nodewise.mean(dim=-1)
 
-                # 2) Average across features => shape [N]
-                loss1_per_node = loss1_nodewise.mean(dim=-1)
-                loss2_per_node = loss2_nodewise.mean(dim=-1)
+                    # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
+                    loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0)
+                    loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0)
+    
+                    # 4) Compute the combined loss for each graph and append to event_losses
+                    scores = (loss1_per_graph + loss2_per_graph)  # Shape: [G]
 
-                # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
-                loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0)
-                loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0)
+                elif self.input_dim in [1,3]:
+                    if self.input_dim == 1:
+                        target0 = batch_jets0.x[:,0].unsqueeze(1)
+                        target1 = batch_jets1.x[:,0].unsqueeze(1)
+                    elif self.input_dim == 3:
+                        target0 = batch_jets0.x
+                        target1 = batch_jets1.x
 
-                # 4) If you want "both jets must exceed threshold" logic as a *score*,
-                #    you can combine them somehow (e.g. take min)
-                #scores = torch.min(loss1_per_graph, loss2_per_graph)
+                    # Model now returns a tuple: (node_recon, edge_pred)
+                    out1, edge_out1 = model(batch_jets0)
+                    out2, edge_out2 = model(batch_jets1)
 
-                # if we want the total loss as the score 
-                scores = loss1_per_graph + loss2_per_graph
-                
-                # 5) Extend the scores and labels
-                #    Typically, each graph in batch_jets0 has a single label in batch_jets0.y, shape [G].
-                all_scores.extend(scores.cpu().tolist())
+                    # 1) Compute node-wise loss (per node, per feature)
+                    loss1_nodewise = criterion_node(out1, target0)  # shape: [N, F_node]
+                    loss2_nodewise = criterion_node(out2, target1)  
+
+                    # 2) Average across node feature dimensions => shape: [N]
+                    loss1_per_node = loss1_nodewise.mean(dim=-1)
+                    loss2_per_node = loss2_nodewise.mean(dim=-1)
+
+                    # 3) Aggregate node losses by graph ID => shape: [G] (G = # graphs in batch)
+                    loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0)
+                    loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0)
+
+                    # 4) Compute edge-wise loss
+                    target_edge1 = batch_jets0.edge_attr
+                    target_edge2 = batch_jets1.edge_attr
+                    loss1_edgewise = criterion_edge(edge_out1, target_edge1)  # shape: [E, F_edge]
+                    loss2_edgewise = criterion_edge(edge_out2, target_edge2)
+
+
+
+                    # 5) Average across edge feature dimensions => shape: [E]
+                    loss1_per_edge = loss1_edgewise.mean(dim=-1)
+                    loss2_per_edge = loss2_edgewise.mean(dim=-1)
+
+                    # 6) Determine graph membership for each edge.
+                    #    We use the source node's batch id.
+                    edge_batch1 = batch_jets0.batch[batch_jets0.edge_index[0]]  # shape: [E]
+                    edge_batch2 = batch_jets1.batch[batch_jets1.edge_index[0]]
+
+                    # 7) Aggregate edge losses by graph => shape: [G]
+                    loss1_edge_per_graph = scatter_mean(loss1_per_edge, edge_batch1, dim=0)
+                    loss2_edge_per_graph = scatter_mean(loss2_per_edge, edge_batch2, dim=0)
+
+                    # 8) Combine node and edge losses per graph.
+                    #     (Optionally add weighting factors, e.g. alpha*node_loss + beta*edge_loss)
+                    scores = loss1_per_graph + loss2_per_graph + loss1_edge_per_graph + loss2_edge_per_graph
+
+
+                all_scores.extend(scores.cpu().tolist())  # Convert to list and extend
                 all_labels.extend(batch_jets0.y.cpu().tolist())  # or however your labels are stored
                 
             # ----- Compute ROC and AUC -----
@@ -126,6 +172,7 @@ class anomaly():
 
         
         print(f"Area Under Curve (AUC): {auc_val:.4f}")
+        
         if self.plot:
             # ----- Plot the ROC curve -----
             plot_file = os.path.join(self.plot_path, "roc_curve.pdf")
@@ -155,11 +202,11 @@ class anomaly():
 
 
             # Compute the 99th percentile for both distributions
-            p99_normal = np.percentile(normal_scores, 95)
-            p99_anomalous = np.percentile(anomalous_scores, 95)
+            p95_normal = np.percentile(normal_scores, 95)
+            p95_anomalous = np.percentile(anomalous_scores, 95)
 
             # Determine the x-axis limit (max of the two 95th percentiles)
-            x_max = max(p99_normal, p99_anomalous)
+            x_max = max(p95_normal, p95_anomalous)
 
             # Define the bin edges based on [0, x_max]
             num_bins = 75  # Number of bins

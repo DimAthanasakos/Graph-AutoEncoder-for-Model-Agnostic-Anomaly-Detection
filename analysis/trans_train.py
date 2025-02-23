@@ -556,9 +556,7 @@ def laman_knn(x, angles = 0, extra_info = False):
     if isinstance(x, np.ndarray):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         x = torch.from_numpy(x).to(device)
-        #x = torch.from_numpy(x)
-    else: 
-        device  = x.device
+    else:  device  = x.device
 
     batch_size, _, _, num_particles = x.size()
     x = x.reshape(2*batch_size, -1, num_particles)
@@ -568,31 +566,16 @@ def laman_knn(x, angles = 0, extra_info = False):
     non_zero_particles = torch.norm(x, p=2, dim=1) != 0
     valid_n = non_zero_particles.sum(axis = 1)
 
-    
-    t_start = time.time()
-
     pt, rapidity, phi, = x.split((1, 1, 1), dim=1)
 
-    #rapidity = 0.5 * torch.log(1 + (2 * pz) / (energy - pz).clamp(min=1e-20))
-    #phi = torch.atan2(py, px)
-    
     x = torch.cat((rapidity, phi), dim=1) # (batch_size, 2, num_points)
 
-    #print()
-    #print(f'time to calculate padded particles, rapidity and phi = {time.time() - t_start:.3f}')
     t_pairwise = time.time()
     inner = -2 * torch.matmul(x.transpose(2, 1), x)                                    # x.transpose(2, 1): flips the last two dimensions
     xx = torch.sum(x ** 2, dim=1, keepdim=True)
     pairwise_distance = -xx - inner - xx.transpose(2, 1)                               # (batch_size, num_points, num_points)
     
-    #print(f'time to calculate pairwise distance = {time.time() - t_pairwise:.3f}')
-    #print()
-    #print(f'pairwise_distance.device = {pairwise_distance.device}')
-    #print(f'pairwise_distance.shape = {pairwise_distance.shape}')
-    #print()
-
     # Connect the 3 hardest particles in the jet in a triangle 
-    time_triangle = time.time()
     idx_3 = pairwise_distance[:, :3, :3].topk(k=3, dim=-1) # (batch_size, 3, 2)
     idx_3 = [idx_3[0][:,:,1:], idx_3[1][:,:,1:]] # (batch_size, 3, 1)
     
@@ -601,13 +584,9 @@ def laman_knn(x, angles = 0, extra_info = False):
     
     # Make the upper right triangle of the distance matrix infinite so that we don't connect the i-th particle with the j-th particle if i > j 
     pairwise_distance = torch.tril(pairwise_distance, diagonal=2) - torch.triu(torch.ones_like(pairwise_distance)*float('inf'), diagonal=3)  # -inf because topk indices return the biggest values -> we've made all distances negative 
-    #print(f'time to create triangle = {time.time() - time_triangle:.3f}')
 
     # Find the indices of the 2 nearest neighbors for each particle
-    time_knn = time.time()
     idx = pairwise_distance.topk(k=2, dim=-1) # It returns two things: values, indices 
-    #print(f'time to calculate knn = {time.time() - time_knn:.3f}')
-    t_idx = time.time()
     idx = idx[1] # (batch_size, num_points - 3, 2)
 
     # Concatenate idx and idx_3 to get the indices of the 3 hardest particles and the 2 nearest neighbors for the rest of the particles
@@ -615,13 +594,9 @@ def laman_knn(x, angles = 0, extra_info = False):
 
     # add 3 rows of -inf to the top of the pairwise_distance tensor to make it of shape (batch_size, num_particles, num_particles)
     # this is because we remove the 3 hardest particles from the graph and we don't want to connect them to the rest of the particles
-    #print(f'pairwise_distance.device = {pairwise_distance.device}')
     pairwise_distance = torch.cat((torch.ones((batch_size, 3, num_particles), device = device)*float('-inf'), pairwise_distance), dim=1)
 
-    #print(f'time to create idx = {time.time() - t_idx:.3f}')
-
     # Initialize a boolean mask with False (indicating no connection) for all pairs
-    time_fillbool = time.time()
     bool_mask = torch.zeros((batch_size, num_particles, num_particles), dtype=torch.bool).to(device)
     # Efficiently populate the boolean mask based on laman_indices
     for i in range(2):  # Assuming each particle is connected to two others as per laman_indices
@@ -638,9 +613,7 @@ def laman_knn(x, angles = 0, extra_info = False):
     # ensure that the adjacency matrix is lower diagonal, useful for when we add angles later at random, to keep track of the connections we remove/already have
     mask_upper = ~torch.triu(torch.ones(num_particles, num_particles, dtype=torch.bool), diagonal=0).to(device)
     bool_mask = bool_mask & mask_upper.unsqueeze(0)
-    #print(f'time to fill bool mask = {time.time() - time_fillbool:.3f}')
 
-    t_memory = time.time()
     # Remove the padded particles from the graph to save memory space when converting to sparse representation.
     range_tensor = torch.arange(num_particles, device = device).unsqueeze(0).unsqueeze(-1)  
     expanded_valid_n = valid_n.unsqueeze(-1).unsqueeze(-1)
@@ -649,8 +622,6 @@ def laman_knn(x, angles = 0, extra_info = False):
 
 
     bool_mask = bool_mask & ~final_mask
-    #print(f'time to remove padded particles = {time.time() - t_memory:.3f}')
-    t_end = time.time()
     # Remove some angles at random between the particles. Default value of angles = 0.
     bool_mask = angles_laman(x, bool_mask, angles, pairwise_distance = pairwise_distance) 
 
@@ -666,8 +637,6 @@ def laman_knn(x, angles = 0, extra_info = False):
         # Calculate the Shannon Entropy and the number of connected components
         connected_components(bool_mask, x)
         shannon_entropy(bool_mask, x)
-    #print(f'time to construct laman knn graph = {time.time() - t_start:.3f}')
-    #print()
 
     bool_mask=bool_mask.reshape(-1, 2, num_particles, num_particles)
 
@@ -862,7 +831,7 @@ def to_ptrapphim(x, eps=1e-8):
 class ParT():
     
     #---------------------------------------------------------------
-    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plots_test'):
+    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_trans/plots_test2'):
         '''
         :param model_info: Dictionary of model info, containing the following keys:
                                 'model_settings': dictionary of model settings
@@ -964,9 +933,9 @@ class ParT():
             self.graph_type = self.model_info['model_settings']['graph']
             self.add_angles = model_info['model_settings']['add_angles']
         else: 
-            self.input_dim = model_info['model_settings']['input_dim'] # 4 for (px, py, pz, E) as input for each particle, 1 for pt
-            if self.input_dim not in [1, 3, 4]:
-                raise ValueError('Invalid input_dim at the config file for ParT. Must be 1, 3 or 4') 
+            self.input_dim = model_info['input_dim'] # 4 for (px, py, pz, E) as input for each particle, 1 for pt
+            #if self.input_dim not in [1, 3, 4]:
+            #    raise ValueError('Invalid input_dim at the config file for ParT. Must be 1, 3 or 4') 
 
 
         self.train_loader, self.val_loader, self.test_loader = self.init_tr_data()
@@ -982,7 +951,8 @@ class ParT():
         X_ParT, Y_ParT = self.load_particles(use_SR=True)
 
         # Delete the last-column (pid or masses or E) of the particles
-        X_ParT = X_ParT[:,:,:,:3]
+        #TODO: BE CAREFUL MAYBE IN THE GRAPH CONSTRUCTION THIS MESSES UP THINGS 
+        #X_ParT = X_ParT[:,:,:,:3]
         if self.local_rank == 0:
             non_zero_particles = np.linalg.norm(X_ParT, axis=3) != 0
             valid_n = non_zero_particles.sum(axis = 2)
@@ -1028,7 +998,8 @@ class ParT():
             self.X_ParT, self.Y_ParT = self.load_particles(use_SR=False)
 
             # Delete the last-column (pid or masses or E) of the particles
-            self.X_ParT = self.X_ParT[:,:,:,:3]
+            #TODO: BE CAREFUL MAYBE IN THE GRAPH CONSTRUCTION THIS MESSES UP THINGS 
+            #self.X_ParT = self.X_ParT[:,:,:,:3]
 
             print(f'X_ParT.shape: {self.X_ParT.shape}')
             print(f'self.X_ParT[0, :, :5, :]: {self.X_ParT[0, :, :5, :]}')
@@ -1159,7 +1130,7 @@ class ParT():
         device = self.torch_device
         # TODO: n_part, n_events
         if not use_SR:
-            particles, jets, mjj = utils.DataLoader(n_events=self.n_total, rank=0, n_part=self.n_part)
+            particles, jets, mjj = utils.DataLoader(n_events=self.n_total, rank=0, n_part=self.n_part, use_area=1)
             labels = [0]*len(particles)       
         elif use_SR:
             jets, particles, mjj, labels = utils.class_loader(use_SR=True, nbkg = self.n_bkg, nsig = self.n_sig, n_part=self.n_part)
@@ -1170,7 +1141,11 @@ class ParT():
             print(f'mjj shape: {mjj.shape}')
             print(f'labels shape: {len(labels)}')
 
-        particles, jets = utils._preprocessing(particles, jets, mjj, norm = 'mean')
+        print(f'before processing')
+        print(f'particles.shape: {particles.shape}')
+        particles, = utils._preprocessing(particles, norm = 'mean', scaled = False)
+        print(f'after processing')
+        print(f'particles.shape: {particles.shape}')
 
         return particles, labels
 
@@ -1253,7 +1228,7 @@ class ParT():
         # Define the model 
         hidden_dim = 2
         enc_cfg = dict(input_dim = self.input_dim, pair_input_dim = self.pair_input_dim, hidden_dim = hidden_dim)
-        dec_cfg = dict(hidden_dim = hidden_dim)
+        dec_cfg = dict(pair_input_dim = self.pair_input_dim, hidden_dim = hidden_dim)
         model = transformer_gae.TAE(enc_cfg, dec_cfg) # 4 features: (px, py, pz, E)
         
         # ==================================================
@@ -1304,8 +1279,8 @@ class ParT():
             total_steps=num_training_steps,
             anneal_strategy='linear',  # Linearly decay the learning rate after warmup
             pct_start=num_warmup_steps / num_training_steps,  # Proportion of warmup steps
-            div_factor=5.0,  # Initial LR is 1/10th of max_lr
-            final_div_factor=4.0  # Final LR is 1/5th of max_lr
+            div_factor=4.0,  # Initial LR is 1/10th of max_lr
+            final_div_factor=5.0  # Final LR is 1/5th of max_lr
         )
 
 
@@ -1331,7 +1306,7 @@ class ParT():
             if self.local_rank == 0:
                 loss_test = self._test_part(self.test_loader,)
                 loss_val = self._test_part(self.val_loader, )
-                if epoch%4==0 or self.ext_plot:
+                if epoch%1==0 or self.ext_plot:
                     auc = self.run_anomaly(plot=False, ep=epoch)
                     actual_train_loss = self._test_part(self.train_loader, )
                     print(f'actual_train_loss={actual_train_loss:.4f}')
@@ -1377,7 +1352,158 @@ class ParT():
         return self.model
 
 
+    #---------------------------------------------------------------
+    def process_batch(self, data, compute_anomaly=False, for_inference=False, index=-1, ep=-1):
+        """
+        Process one batch from the data loader: move inputs to device, perform scaling,
+        split into branches for the two jets, forward through the model, and compute the loss.
+
+        Args:
+            data: A tuple from the DataLoader.
+                Typically, (inputs, labels) for non-graph tasks, or (inputs, labels, graph)
+                if self.graph_transformer is True.
+
+        Returns:
+            loss: A scalar tensor representing the combined loss for the batch.
+            count: The number of examples (batch size) in the batch.
+        """
+        # choices for training,  inp: scaled, rel: scaled, target: scaled: name: sc
+        # choices for inference, inp: raw,    rel: raw,    target: raw   : name: raw
+        # choices for training,  inp: scaled, rel: raw,    target: scaled: name: mix1
+
+        input_choice = 'sc'
+        rel_choice = 'raw'
+        target_choice = 'sc'
+
+        if index==0 and ep==1: 
+            print(f'-.'*30)
+            print(f'input_choice: {input_choice}, rel_choice: {rel_choice}, target_choice: {target_choice}')
+            print(f'-.'*30)
+
+        # Unpack the data: inputs and labels (and graph if applicable)
+        inputs = data[0].to(self.torch_device)
+        batch_size = inputs.shape[0]
+
+        # --- Preprocessing/scaling step ---
+        # Convert inputs to numpy, transpose to match expected shape,
+        # process with _preprocessing, then convert back to torch.
+        scaled_inputs_np = inputs.cpu().numpy().transpose(0, 1, 3, 2)
+        # Here we assume your preprocessing returns a tuple with one element
+        (scaled_inputs_np,) = utils._preprocessing(scaled_inputs_np, norm='mean', scaled=True)
+        # Transpose back to the original ordering and convert to torch
+        scaled_inputs = (
+            torch.from_numpy(scaled_inputs_np.transpose(0, 1, 3, 2))
+                .to(self.torch_device)
+                .float()
+        )
+
+        # --- Split the inputs into the two jets (assuming first dimension indexes the two jets) ---
+        # Use only the first three channels (pt, eta, phi) from the original inputs and scaled inputs.
+        jet0 = inputs[:, 0, :3, :]
+        jet1 = inputs[:, 1, :3, :]
+        jet0_scaled = scaled_inputs[:, 0, :3, :]
+        jet1_scaled = scaled_inputs[:, 1, :3, :]
+
+        # --- Graph extraction (if applicable) ---
+        if self.graph_transformer and len(data) >= 3:
+            graph = data[2].to(self.torch_device)
+            graph0 = graph[:, 0, :, :]
+            graph1 = graph[:, 1, :, :]
+        else:
+            graph0, graph1 = None, None
+
+        # --- Set up the "raw" inputs for the model ---
+        # Here we use the raw jet information (p3) as the starting point.
+            
+        # --- Determine model input based on self.input_dim ---
+        if self.input_dim == 1:
+            # Use only the pt channel; unsqueeze to add the channel dimension.
+            if input_choice=='raw':  x0, x1 = jet0[:, 1, :].unsqueeze(1), jet1[:, 1, :].unsqueeze(1)
+            elif input_choice=='sc': x0, x1 = jet0_scaled[:, 1, :].unsqueeze(1), jet1_scaled[:, 1, :].unsqueeze(1)
+        elif self.input_dim==5: 
+            # Use pt and eta channels.
+            if input_choice=='raw':  x0, x1 = jet0[:, :2, :], jet1[:, :2, :]
+            elif input_choice=='sc': x0, x1 = jet0_scaled[:, :2, :], jet1_scaled[:, :2, :]
+        elif self.input_dim==2: 
+            # Use pt and eta channels.
+            if input_choice=='raw':  x0, x1 = jet0[:, 1:3, :], jet1[:, 1:3, :]
+            elif input_choice=='sc': x0, x1 = jet0_scaled[:, 1:3, :], jet1_scaled[:, 1:3, :]
+        elif self.input_dim == 3:
+            # Use all three channels (pt, eta, phi).
+            if input_choice=='raw':  x0, x1 = jet0, jet1
+            elif input_choice=='sc': x0, x1 = jet0_scaled, jet1_scaled
+        else:
+            # Default fallback.
+            x0, x1 = jet0, jet1
+
+        # for relative info: 
+        if rel_choice=='sc': v0, v1 = jet0_scaled, jet1_scaled
+        elif rel_choice=='raw': v0, v1 = jet0, jet1 
+
+        # --- Forward pass through the model ---
+        out0 = self.model(x=x0, v=v0, graph=graph0)
+        out1 = self.model(x=x1, v=v1, graph=graph1)
+
+        # --- Permute targets to match the output shape ---
+        # The model outputs are assumed to have shape (batch, num_particles, feature_dim).
+        if target_choice == 'sc': 
+            target0 = jet0_scaled.permute(0, 2, 1)  # from (batch, channels, particles) to (batch, particles, channels)
+            target1 = jet1_scaled.permute(0, 2, 1)
+        elif target_choice == 'raw':
+            target0 = jet0.permute(0, 2, 1)
+            target1 = jet1.permute(0, 2, 1)
         
+
+        # --- Compute the loss ---
+        loss0 = self.criterion(out0, target0)
+        loss1 = self.criterion(out1, target1)
+        global_loss = loss0 + loss1
+
+
+        if index == 0 and self.local_rank == 0 and ep%2==-1:
+            # Avoid division by zero: Create a mask where p3_0 is non-zero
+            residual = jet0 - out0  
+            nonzero_mask = (jet0 != 0)
+                
+            l = torch.nn.MSELoss(reduction='none')(out0, jet0)
+            l_clamped = torch.clamp(l, min=-3, max=3)
+            l_clamped = torch.round(l_clamped*1000)/1000
+
+            print(f'l.shape: {l.shape}')
+
+            print(f'===============')
+            #print(f'p3_0[0, :5, :5]:')
+            #print(p3_0[0, :5, :5])
+            #print("====================================================\n")
+            #print(f'x0[0, :5, :5]:')
+            #print(x0[0, :5, :5])
+            print(f'out0[0, :5, :5]:')
+            print(out0[0, :5, :5])
+            print("====================================================\n")
+            print(f'l_clamped[:2, :5]')
+            print(l_clamped[0, :5])
+            print("====================================================\n")
+            l_node = l.mean(dim=-1)
+            l_graph = l_node.mean(dim=-1)
+
+        # --- Optionally compute nodewise (anomaly) loss scores ---
+        if compute_anomaly:
+            criterion_node = torch.nn.MSELoss(reduction='none')
+            loss0_nodewise = criterion_node(out0, target0)  # shape: (batch, num_particles, feature_dim)
+            loss1_nodewise = criterion_node(out1, target1)
+            # Average over the feature dimension to get a per-node loss.
+            loss0_per_node = loss0_nodewise.mean(dim=-1)  # shape: (batch, num_particles)
+            loss1_per_node = loss1_nodewise.mean(dim=-1)
+            # Aggregate over nodes to get a per-example (per graph) score.
+            # Here we sum over the nodes and divide by the number of nodes.
+            score0 = loss0_per_node.sum(dim=1) / target0.shape[1]
+            score1 = loss1_per_node.sum(dim=1) / target1.shape[1]
+            anomaly_scores = score0 + score1  # shape: (batch,)
+            return global_loss, batch_size, anomaly_scores
+        else:
+            return global_loss, batch_size
+
+
     #---------------------------------------------------------------
     def _train_part(self, ep=-1):
 
@@ -1386,111 +1512,24 @@ class ParT():
                                   # We need to include this since we have particlenet.eval() in the test_particlenet function
         
         loss_cum = 0              # Cumulative loss
-        count = 0                 
+        total_count = 0                 
         
         for index, data in enumerate(self.train_loader):
-            inputs, labels = data[0], data[1]   
-            inputs = inputs.to(self.torch_device)
-
-            jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
-            length = jet0.shape[0]
-
-            if self.graph_transformer: 
-                graph = data[2].to(self.torch_device)
-                graph0, graph1 = graph[:, 0, :, :], graph[:, 1, :, :]
-            else:  graph0, graph1 = None, None
-            graph0, graph1 = None, None
             # zero the parameter gradients
             self.optimizer.zero_grad()
+            loss, count = self.process_batch(data, index=index, ep=ep)
 
-            #p3_0 = to_ptrapphim(jet0)
-            #p3_1 = to_ptrapphim(jet1)
-            p3_0 = jet0 
-            p3_1 = jet1
-            
-            if self.input_dim == 1:
-                # create pt of each particle instead of (px, py, pz, E) for the input 
-                x0 = p3_0[:, 0, :].unsqueeze(1)
-                x1 = p3_1[:, 0, :].unsqueeze(1)
-                #print(f'x0.shape: {x0.shape}')
-            elif self.input_dim == 2:
-                # create pt of each particle instead of (px, py, pz, E) for the input 
-                x0 = p3_0[:, 0, :].unsqueeze(1)
-                x1 = p3_1[:, 0, :].unsqueeze(1)
-                #print(f'x0.shape: {x0.shape}')
-                # Create a zero tensor of the same size as x1
-                zero_tensor = torch.zeros_like(x1)  # Shape: [512, 1, 20]
-
-                # Concatenate x1 and the zero tensor along the last dimension
-                x0 = torch.cat((x0, zero_tensor), dim=-2)  # Shape: [512, 2, 20]
-                x1 = torch.cat((x1, zero_tensor), dim=-2)  # Shape: [512, 2, 20]
-
-
-            elif self.input_dim == 3: 
-                x0 = p3_0
-                x1 = p3_1
-
-            else:
-                x0, x1 = jet0, jet1
-            #print(f'x0.shape: {x0.shape}')
-            #print(f'jet0.shape: {jet0.shape}')
-            #print(f'p3_0.shape: {p3_0.shape}')
-            # forward + backward + optimize
-
-            out0 = self.model(x = x0, v = jet0, graph = graph0, debug = False if index == 0 else False) # pr=True if index==0 else False)
-            out1 = self.model(x = x1, v = jet1, graph = graph1)
-            p3_0 = p3_0.permute(0, 2, 1)
-            p3_1 = p3_1.permute(0, 2, 1)
-            jet0 = jet0.permute(0, 2, 1)
-            jet1 = jet1.permute(0, 2, 1)
-            
-            loss0 = self.criterion(out0, p3_0  )  
-            loss1 = self.criterion(out1, p3_1  )
-            loss = loss0 + loss1
-            #if self.local_rank == 0:
-            #    print(f'Index: {index}, loss: {loss.item()}')
             loss.backward()
             self.optimizer.step()
             self.scheduler.step() # Update learning rate based on each training step, not each epoch
 
-            loss_cum += loss.item()*length
-            count += length
-
-            if index == 0 and self.local_rank == 0 and ep%1==-1:
-                # Avoid division by zero: Create a mask where p3_0 is non-zero
-                residual = p3_0 - out0  
-                nonzero_mask = (p3_0 != 0)
-                
-                l = torch.nn.MSELoss(reduction='none')(out0, p3_0)
-                l_clamped = torch.clamp(l, min=-3, max=3)
-                l_clamped = torch.round(l_clamped*1000)/1000
-
-                print(f'l.shape: {l.shape}')
-
-                print(f'===============')
-                print(f'p3_0[0, :5, :5]:')
-                print(p3_0[0, :5, :5])
-                print("====================================================\n")
-                print(f'out0[0, :5, :5]:')
-                print(out0[0, :5, :5])
-                print("====================================================\n")
-                print(f'l_clamped[0, :5]')
-                print(l_clamped[0, :5])
-                print("====================================================\n")
-                print(f'p3_1[0, :5, :5]:')
-                print(p3_1[0, :5, :5])
-                print("====================================================\n")
-                print(f'out1[0, :5, :5]:')
-                print(out1[0, :5, :5])
-                print("====================================================\n")
-
-                l_node = l.mean(dim=-1)
-                l_graph = l_node.mean(dim=-1)
+            loss_cum += loss.item()*count
+            total_count += count
 
             # Cache management
             torch.cuda.empty_cache()
             
-        return loss_cum/count
+        return loss_cum/total_count
 
 
     #---------------------------------------------------------------
@@ -1498,53 +1537,12 @@ class ParT():
     def _test_part(self, test_loader,):
         self.model.eval()
         loss_cum = 0
-        count = 0
-        
+        total_count = 0
         for index, data in enumerate(test_loader):
-            inputs, labels = data[0], data[1]   
-            inputs = inputs.to(self.torch_device)
-
-            jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
-            length = jet0.shape[0]
-
-
-            if self.graph_transformer: 
-                graph = data[2].to(self.torch_device)
-                graph0, graph1 = graph[:, 0, :, :], graph[:, 1, :, :]
-            else:   graph0, graph1 = None, None
-            
-            # zero the parameter gradients
-            self.optimizer.zero_grad()
-
-            #p3_0 = to_ptrapphim(jet0)
-            #p3_1 = to_ptrapphim(jet1)
-            p3_0 = jet0 
-            p3_1 = jet1
-            if self.input_dim == 1:
-                # create pt of each particle instead of (px, py, pz, E) for the input 
-                x0 = p3_0[:, 0, :].unsqueeze(1)
-                x1 = p3_1[:, 0, :].unsqueeze(1)
-
-            elif self.input_dim == 3: 
-                x0 = p3_0
-                x1 = p3_1
-
-            else:
-                x0, x1 = jet0, jet1
-
-            out0 = self.model(x = x0, v = jet0, graph = graph0) 
-            out1 = self.model(x = x1, v = jet1, graph = graph1) 
-            p3_0 = p3_0.permute(0, 2, 1)
-            p3_1 = p3_1.permute(0, 2, 1)
-            
-            loss0 = self.criterion(out0, p3_0  )
-            loss1 = self.criterion(out1, p3_1  )
-            loss = loss0 + loss1
-
-            loss_cum += loss.item()*length
-            count += length
-        
-        return loss_cum/count
+            loss, count = self.process_batch(data,)
+            loss_cum += loss.item()*count
+            total_count += count
+        return loss_cum/total_count
 
 
 
@@ -1557,60 +1555,8 @@ class ParT():
         criterion_node = torch.nn.MSELoss(reduction='none') # This 
         with torch.no_grad():
             for index, data in enumerate(self.test_loader):
-                inputs, labels = data[0], data[1]   
-                inputs = inputs.to(self.torch_device)
-
-                jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
-                length = jet0.shape[0]
-
-
-                if self.graph_transformer: 
-                    graph = data[2].to(self.torch_device)
-                    graph0, graph1 = graph[:, 0, :, :], graph[:, 1, :, :]
-                else:   graph0, graph1 = None, None
-                
-                # zero the parameter gradients
-                self.optimizer.zero_grad()
-
-                #p3_0 = to_ptrapphim(jet0)
-                #p3_1 = to_ptrapphim(jet1)
-                p3_0 = jet0 
-                p3_1 = jet1
-                if self.input_dim == 1:
-                    # create pt of each particle instead of (px, py, pz, E) for the input 
-                    x0 = p3_0[:, 0, :].unsqueeze(1)
-                    x1 = p3_1[:, 0, :].unsqueeze(1)
-
-                elif self.input_dim == 3: 
-                    x0 = p3_0
-                    x1 = p3_1
-
-                else:
-                    x0, x1 = jet0, jet1
-
-                out0 = self.model(x = x0, v = jet0, graph = graph0)
-                out1 = self.model(x = x1, v = jet1, graph = graph1) 
-                p3_0 = p3_0.permute(0, 2, 1)
-                p3_1 = p3_1.permute(0, 2, 1)
-
-                # 1) Nodewise loss => shape [N, F]
-                loss0_nodewise = criterion_node(out0, p3_0 )
-                loss1_nodewise = criterion_node(out1, p3_1 )
-
-                # 2) Average across features => shape [N]
-                loss0_per_node = loss0_nodewise.mean(dim=-1)
-                loss1_per_node = loss1_nodewise.mean(dim=-1) 
-
-                loss0_per_graph = loss0_per_node.sum(dim=1)/p3_0.shape[1]
-                loss1_per_graph = loss1_per_node.sum(dim=1)/p3_1.shape[1]
-
-                # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
-                #loss0_per_graph = scatter_mean(loss0_per_node, p3_0, dim=0)
-                #loss1_per_graph = scatter_mean(loss1_per_node, p3_1, dim=0)
-
-                # 4) Compute the combined loss for each graph and append to event_losses
-                scores = (loss0_per_graph + loss1_per_graph)  # Shape: [G]
-                event_losses.extend(scores.cpu().tolist())  # Convert to list and extend
+                loss, count, anomaly_scores = self.process_batch(data, compute_anomaly=True)
+                event_losses.extend(anomaly_scores.cpu().tolist())
 
         plot_file = os.path.join(self.plot_path, 'val_loss_distribution.pdf')
 
@@ -1665,7 +1611,7 @@ class ParT():
             ax1.set_ylabel('Loss', color='black', fontsize='large')
             ax1.set_xlabel('epochs', fontsize='large')
             ax1.set_title(f'Loss Distribution and AUC, Transformer, n_part = {self.n_part}', fontsize='x-large')
-            ax1.set_ylim(0.005, 0.03)
+            ax1.set_ylim(0.005, 0.07)
             ax1.grid()
             
 
@@ -1711,91 +1657,11 @@ class ParT():
 
             all_scores = []  # this will store the continuous anomaly score
             all_labels = []  # ground-truth anomaly labels (0 or 1)
-
             with torch.no_grad():
                 for index, data in enumerate(self.cl_loader):
-                    inputs, labels = data[0], data[1]   
-                    inputs = inputs.to(self.torch_device)
-
-                    jet0, jet1 = inputs[:,0, :, :], inputs[:,1, :, :]
-                    length = jet0.shape[0]
-
-                    if self.graph_transformer: 
-                        graph = data[2].to(self.torch_device)
-                        graph0, graph1 = graph[:, 0, :, :], graph[:, 1, :, :]
-                    else:   graph0, graph1 = None, None
-                    
-                    # zero the parameter gradients
-                    self.optimizer.zero_grad()
-
-                    #p3_0 = to_ptrapphim(jet0)
-                    #p3_1 = to_ptrapphim(jet1)
-                    p3_0 = jet0 
-                    p3_1 = jet1
-                    if self.input_dim == 1:
-                        # create pt of each particle instead of (px, py, pz, E) for the input 
-                        x0 = p3_0[:, 0, :].unsqueeze(1)
-                        x1 = p3_1[:, 0, :].unsqueeze(1)
-
-                    elif self.input_dim == 3: 
-                        x0 = p3_0
-                        x1 = p3_1
-
-                    else:
-                        x0, x1 = jet0, jet1
- 
-                    out0 = self.model(x = x0, v = jet0, graph = graph0)  
-                    out1 = self.model(x = x1, v = jet1, graph = graph1) 
-                    p3_0 = p3_0.permute(0, 2, 1)
-                    p3_1 = p3_1.permute(0, 2, 1)
-
-                    if index == 0 and self.local_rank == 0 and ep%5==-1:
-                        # Avoid division by zero: Create a mask where p3_0 is non-zero
-                        residual = p3_0 - out0  
-                        nonzero_mask = (p3_0 != 0)
-
-                        # Scale the residual by p3_0 where nonzero, else set it to 0
-                        scaled_residual = torch.zeros_like(residual)
-                        scaled_residual[nonzero_mask] = residual[nonzero_mask] / p3_0[nonzero_mask]
-                        # Clip scaled_residual to [-1, 1]
-                        scaled_residual = torch.clamp(scaled_residual, min=-1, max=1)
-                        scaled_residual = torch.round(scaled_residual*1000)/1000
-
-
-                        print(f'===============')
-                        print(f'Anomaly Detection')
-                        print(f'p3_0[:2, :5, :5]:')
-                        print(p3_0[:2, :5, :5])
-                        print()
-                        
-                        print(f'out0[:2, :5, :5]:')
-                        print(out0[:2, :5, :5])
-                        print()
-                        print(f'scaled_residual[:2, :5, :5]:')
-                        print(scaled_residual[:2, :5, :5])
-                        #print("\n".join(["\t".join([f"{val:.2f}" for val in row]) for row in scaled_residual]))
-                        print()
-                        print(f'===============')
-
-                    # 1) Nodewise loss => shape [N, F]
-                    loss0_nodewise = criterion_node(out0, p3_0  )
-                    loss1_nodewise = criterion_node(out1, p3_1  )
-
-                    # 2) Average across features => shape [N]
-                    loss0_per_node = loss0_nodewise.mean(dim=-1)
-                    loss1_per_node = loss1_nodewise.mean(dim=-1)
-
-                    loss0_per_graph = loss0_per_node.sum(dim=1)/p3_0.shape[1]
-                    loss1_per_graph = loss1_per_node.sum(dim=1)/p3_1.shape[1]
-
-                    # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
-                    #loss0_per_graph = scatter_mean(loss0_per_node, p3_0, dim=0)
-                    #loss1_per_graph = scatter_mean(loss1_per_node, p3_1, dim=0)
-
-                    # 4) Compute the combined loss for each graph and append to event_losses
-                    scores = (loss0_per_graph + loss1_per_graph)  
-                    all_scores.extend(scores.cpu().tolist())
-                    all_labels.extend(labels.cpu().tolist())
+                    loss, count, anomaly_scores = self.process_batch(data, compute_anomaly=True)
+                    all_scores.extend(anomaly_scores.cpu().tolist())
+                    all_labels.extend(data[1].cpu().tolist())
 
                 # ----- Compute ROC and AUC -----
                 fpr, tpr, thresholds = roc_curve(all_labels, all_scores)

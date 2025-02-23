@@ -24,7 +24,7 @@ from torch_geometric.data import Data, DataListLoader
 from torch_geometric.loader import DataLoader #.data.DataLoader has been deprecated
 from torch_scatter import scatter_mean
 
-from models.models import EdgeNet, EdgeNetVAE, EdgeNet2, EdgeNetDeeper, GATAE
+from models.models import EdgeNet, EdgeNetVAE, EdgeNet2, EdgeNetDeeper, GATAE, EdgeNet_edge, StackedEdgeNet_edge, HybridEdgeNet
 import ml_anomaly
 
 import networkx
@@ -32,7 +32,6 @@ import energyflow as ef
 import random
 
 import h5py 
-
 
 
 class gae(): 
@@ -76,6 +75,8 @@ class gae():
         self.batch_size = self.model_info['model_settings']['batch_size']
         self.patience = self.model_info['model_settings']['patience']
         self.lossname = self.model_info['model_settings']['lossname']
+        self.input_dim = self.model_info['model_settings']['input_dim']
+        self.pair_input_dim = self.model_info['model_settings']['pair_input_dim']
         
         if self.lossname == 'MSE': self.criterion = torch.nn.MSELoss()
         else: sys.exit(f'Error: loss {self.lossname} not recognized.')
@@ -108,6 +109,28 @@ class gae():
             eta_min=1e-6  # Minimum learning rate at the end of annealing
         )
 
+        # Optimizer
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.learning_rate,  # Initial learning rate (use a smaller value, e.g., 1e-4 or 5e-5)
+            weight_decay=0.01  # Regularization to reduce overfitting
+        )
+
+        # Scheduler
+        num_training_steps = len(self.train_loader) * self.epochs  # Total number of training steps
+        num_warmup_steps = int(0.05 * num_training_steps)  # Warmup for 20% of training steps
+
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=self.learning_rate,  # Peak learning rate during warmup
+            total_steps=num_training_steps,
+            anneal_strategy='linear',  # Linearly decay the learning rate after warmup
+            pct_start=num_warmup_steps / num_training_steps,  # Proportion of warmup steps
+            div_factor=5.0,  # Initial LR is 1/10th of max_lr
+            final_div_factor=2.0 ) # Final LR is 1/5th of max_lr
+        
+
+
         if self.ddp:
             self.model = DDP(self.model, device_ids=[self.rank], output_device=self.rank,)
             #self.batch_size = self.batch_size // torch.cuda.device_count()
@@ -119,15 +142,11 @@ class gae():
         dataset = torch.load(self.path)
 
         #random.Random(0).shuffle(dataset)
-        print(f'Loaded training (SB) dataset with {len(dataset)} samples')
-        print()
-        if self.rank==0 and self.n_total > len(dataset):
-            print()
-            print(f'==========================================')
-            print(f'WARNING')
+        print(f'Loaded training (SB) dataset with {len(dataset)} samples\n')
+        if self.n_total > len(dataset):
+            print(f'\n==========================================')
             print(f'Warning: n_total ({self.n_total}) is greater than the dataset length ({len(dataset)}).')
-            print(f'==========================================')
-            print()
+            print(f'==========================================\n')
 
 
         dataset = dataset[:self.n_total]
@@ -156,15 +175,18 @@ class gae():
         '''
         model_to_choose = self.model_info['model']
         if model_to_choose == 'EdgeNet':
-            model = EdgeNet(input_dim=3, big_dim=64, hidden_dim=2, aggr='mean')
+            model = EdgeNet(input_dim=self.input_dim, big_dim=32, latent_dim=2, dropout_rate=0.1)
+        elif model_to_choose == 'EdgeNet_edge':
+            model = EdgeNet_edge(input_dim=self.input_dim, edge_dim=self.pair_input_dim, big_dim=32, latent_dim=3, output_dim = self.input_dim, dropout_rate=0.0)
+            #model = StackedEdgeNet_edge(input_dim=self.input_dim, edge_dim=3, hidden_dim=32, latent_dim=64, output_dim=3,
+            #                    num_encoder_layers=3, num_decoder_layers=3, aggr='mean', dropout_rate=0.1)
+        elif model_to_choose == 'HybridEdgeNet':
+            model = HybridEdgeNet(input_dim=self.input_dim, edge_dim=3, hidden_dim=32, latent_dim=2, 
+                          output_dim=3, num_encoder_layers=3, aggr='mean', dropout_rate=0.)
         elif model_to_choose == 'GATAE':
             model = GATAE(input_dim=3, hidden_dim=32, latent_dim=2, heads=2, dropout=0.0, add_skip=True)
 
         else: sys.exit(f'Error: model {model_to_choose} not recognized.') 
-
-        # ==================================================
-        model = torch.compile(model)
-        # ==================================================
 
         # Print the model architecture if master process
         if self.rank == 0:
@@ -186,51 +208,57 @@ class gae():
         self.auc_list = []
         self.train_loss_list = []
         self.val_loss_list = []
+
+        anomaly_model = ml_anomaly.anomaly(self.model_info, plot=False)
         for epoch in range(1, self.epochs+1):
             if self.ddp: self.train_sampler.set_epoch(epoch)  
 
             t_start = time.time()
-            loss_train = self._train_loop(ep=epoch)
+            loss_train, l_nodes, l_edges = self._train_loop(ep=epoch)
             loss_val = self._test_loop(self.val_loader,)
             loss_test = self._test_loop(self.test_loader,)
             
-            if epoch%6==0 or self.ext_plot:
-                AUC = ml_anomaly.anomaly(self.model, self.model_info, plot=False).run()
-                actual_train_loss = self._test_loop(self.train_loader,)
-                print(f'actual_train_loss={actual_train_loss:.5f}')
-                self.auc_list.append(AUC)
-                self.train_loss_list.append(actual_train_loss)
+            if epoch%1==0 or self.ext_plot:
+                auc = anomaly_model.run(model=self.model)
+                #actual_train_loss = self._test_loop(self.train_loader,)
+                #print(f'actual_train_loss={actual_train_loss:.5f}')
+                self.auc_list.append(auc)
+                #self.train_loss_list.append(actual_train_loss)
                 self.val_loss_list.append(loss_val)
 
-            # only print if its the main process
-            if self.rank == 0:
-                print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.4f}, loss_val: {loss_val:.4f}, loss_test: {loss_test:.4f}, lr: {self.optimizer.param_groups[0]["lr"]:.5f}, Time: {time.time() - t_start:.1f} sec')
-                print("--------------------------------")
+
+            print(f'Epoch: {epoch:02d}, loss_train: {loss_train:.5f}, loss_val: {loss_val:.5f}, loss_test: {loss_test:.5f}, lr: {self.optimizer.param_groups[0]["lr"]:.5f}, Time: {time.time() - t_start:.1f} sec')
+            #print(f'Node loss: {l_nodes:.5f}, Edge loss: {l_edges:.5f}')
+            print("--------------------------------")
                 
             if loss_val < best_val_loss:
                 best_val_loss = loss_val
                 torch.save(self.model.state_dict(), best_model_path)
             
-            #self.scheduler.step(loss_val)
-
 
         # lets plot the loss distribution of the test set
-        if self.rank == 0:            
-            print(f'--------------------------------')
-            print(f'Finished training')
-            print()
-            self._plot_loss()
+        print(f'--------------------------------')
+        print(f'Finished training\n')
         
-        # Load the best model before returning
-        self.model.load_state_dict(torch.load(best_model_path))  # Load best model's state_dict
+        # Load the best model before evaluating final metrics.
+        self.model.load_state_dict(torch.load(best_model_path))
         print("Loaded the best model based on validation loss.")
-        loss_val = self._test_loop(self.val_loader,)
-        loss_test = self._test_loop(self.test_loader,)
-        print(f'Best model validation loss: {loss_val:.5f}')
-        print(f'Best model test loss: {loss_test:.5f}')
 
+        best_train_loss = self._test_loop(self.train_loader)
+        best_val_loss  = self._test_loop(self.val_loader)
+        best_test_loss = self._test_loop(self.test_loader)
+        anomaly_model = ml_anomaly.anomaly(self.model_info, plot=True)
+        auc = anomaly_model.run(model=self.model)
+        #auc = anomaly_model.run(model=self.model, plot=True)
+        self._plot_loss()
 
-        return self.model
+        print(f'Best model train loss: {best_train_loss:.5f}')
+        print(f'Best model validation loss: {best_val_loss:.5f}')
+        print(f'Best model test loss: {best_test_loss:.5f}')
+        print(f'AUC: {auc:.5f}')
+        print(f'--------------------------------\n')
+        # Return the best model and the metrics for this run.
+        return self.model, best_train_loss, best_val_loss, best_test_loss, auc
 
 
     #---------------------------------------------------------------
@@ -238,70 +266,61 @@ class gae():
         self.model.train()
         loss_cum = 0
         count = 0
+        loss_cum_nodes, loss_cum_edges = 0, 0
         for batch_idx, (batch_jets0, batch_jets1) in enumerate(self.train_loader):
             self.optimizer.zero_grad()
             length = len(batch_jets0)
-            batch_jets0 = batch_jets0.to(self.torch_device)
-            batch_jets1 = batch_jets1.to(self.torch_device)     
+            batch_jets0, batch_jets1 = batch_jets0.to(self.torch_device), batch_jets1.to(self.torch_device)
 
-            out0 = self.model(batch_jets0)
-            out1 = self.model(batch_jets1)
-            #print(f'out0.shape: {out0.shape}')
-            if batch_idx==0 and ep%1==-1:
-                n_print = min(2, length)
-                values_to_match = torch.arange(0, n_print, device=batch_jets0.batch.device)  # Values from 0 to n_print-1
-                mask0 = (batch_jets0.batch.unsqueeze(1) == values_to_match).any(dim=1)
-                #mask0 = (batch_jets0.batch == 0) | (batch_jets0.batch == 1)
-                in0 = batch_jets0.x[mask0].reshape(n_print, -1, 3)
-                out0_reshaped = out0.reshape(-1, in0.shape[1], 3)
-                in1 =  batch_jets1.x[mask0].reshape(n_print, -1, 3)
-                out1_reshaped = out1.reshape(-1, in1.shape[1], 3)
+            # Unpack outputs: node reconstructions and predicted edge attributes.
+            if self.input_dim == 4:
+                out0 = self.model(batch_jets0)
+                out1 = self.model(batch_jets1)
 
+                loss_node0 = self.criterion(out0, batch_jets0.match)
+                loss_node1 = self.criterion(out1, batch_jets1.match)
+                loss = loss_node0 + loss_node1
+                
 
-                l = torch.nn.MSELoss(reduction='none')(out0, batch_jets0.x)
-                l = l.reshape(-1, in0.shape[1], 3)
-                l_clamped = torch.clamp(l, min=-3, max=3)
-                l_clamped = torch.round(l_clamped*1000)/1000
+            elif self.input_dim in [1,3]:
+                if self.input_dim==1:
+                    target0 = batch_jets0.x[:,0].unsqueeze(1)
+                    target1 = batch_jets1.x[:,0].unsqueeze(1)
+                elif self.input_dim==3:
+                    target0 = batch_jets0.x
+                    target1 = batch_jets1.x
+                
 
-                # 'out0.x' has the node features after passing through the model.
-                # 'batch_jets0.x' are the original input features for the same nodes.
-                # We'll just print a few rows (.head equivalent) for clarity:
-                print("=== First graph in the first batch of this epoch ===")
-                print(f'in0[0, :5]:' )
-                print(in0[0, :5])
-                print()
-                print("====================================================\n")
-                print(f'out0_reshaped[0,:5]:' )
-                print(out0_reshaped[0,:5])
-                print()
-                print("====================================================\n")
-                print(f'l_clamped[0, :5]:' )
-                print(l_clamped[0, :5])
-                print()
-                print("====================================================\n")
-                print(f'in1[0, :5]:' )
-                print(in1[0, :5])
-                print()
-                print("====================================================\n")
-                print(f'out1_reshaped[0,:5]:' )
-                print(out1_reshaped[0,:5])
-                print()
-                print("====================================================\n")
+                out0, edge_out0 = self.model(batch_jets0)
+                out1, edge_out1 = self.model(batch_jets1)
+        
+                # Node reconstruction loss.
+                loss_node0 = self.criterion(out0, target0)
+                loss_node1 = self.criterion(out1, target1)
 
-
-            loss0 = self.criterion(out0, batch_jets0.x)   # multiply by 100 to scale the loss
-            loss1 = self.criterion(out1, batch_jets1.x)  
-            loss = loss0 + loss1
+                # Edge reconstruction loss.
+                # batch_jets0.edge_attr: shape [n_edges * batch_size * 2, F_edge]
+                target_edge0 = batch_jets0.edge_attr 
+                target_edge1 = batch_jets1.edge_attr 
+                loss_edge0 = self.criterion(edge_out0, target_edge0)
+                loss_edge1 = self.criterion(edge_out1, target_edge1)
+                
+                # Combine losses (you may weight them if necessary).
+                loss = loss_node0 + loss_node1 + loss_edge0 + loss_edge1
+                loss_nodes = loss_node0.item() + loss_node1.item()
+                loss_edges = loss_edge0.item() + loss_edge1.item()
+            
 
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
 
             loss_cum += loss.item() * length
+            loss_cum_nodes += loss_nodes * length
+            loss_cum_edges += loss_edges * length
             count += length
-            # Cache management
-            #torch.cuda.empty_cache()
-        return loss_cum/count
+            
+        return loss_cum/count, loss_cum_nodes/count, loss_cum_edges/count
 
     
     #---------------------------------------------------------------
@@ -313,21 +332,44 @@ class gae():
 
         for batch_jets0, batch_jets1 in test_loader:
             length = len(batch_jets0)
-            batch_jets0 = batch_jets0.to(self.torch_device)
-            batch_jets1 = batch_jets1.to(self.torch_device)
+            batch_jets0, batch_jets1 = batch_jets0.to(self.torch_device) , batch_jets1.to(self.torch_device)
+            # Unpack outputs: node reconstructions and predicted edge attributes.
+            if self.input_dim == 4:
+                out0 = self.model(batch_jets0)
+                out1 = self.model(batch_jets1)
 
-            out0 = self.model(batch_jets0)
-            out1 = self.model(batch_jets1)
+                loss_node0 = self.criterion(out0, batch_jets0.match)
+                loss_node1 = self.criterion(out1, batch_jets1.match)
+                loss = loss_node0 + loss_node1
+                
 
-            loss0 = self.criterion(out0, batch_jets0.x) 
-            loss1 = self.criterion(out1, batch_jets1.x) 
+            elif self.input_dim in [1,3]:
+                if self.input_dim==1:
+                    target0 = batch_jets0.x[:,0].unsqueeze(1)
+                    target1 = batch_jets1.x[:,0].unsqueeze(1)
+                elif self.input_dim==3:
+                    target0 = batch_jets0.x
+                    target1 = batch_jets1.x
+                
 
-            loss = loss0 + loss1
+                out0, edge_out0 = self.model(batch_jets0)
+                out1, edge_out1 = self.model(batch_jets1)
+        
+                # Node reconstruction loss.
+                loss_node0 = self.criterion(out0, target0)
+                loss_node1 = self.criterion(out1, target1)
+                
+                # Edge reconstruction loss.
+                target_edge0 = batch_jets0.edge_attr 
+                target_edge1 = batch_jets1.edge_attr 
+                loss_edge0 = self.criterion(edge_out0, target_edge0)
+                loss_edge1 = self.criterion(edge_out1, target_edge1)
+                
+                # Combine losses (you may weight them if necessary).
+                loss = loss_node0 + loss_node1 + loss_edge0 + loss_edge1
 
             loss_cum += loss.item() * length
             count += length
-            # Cache management
-            #torch.cuda.empty_cache()
             
         return loss_cum / count
 
@@ -337,29 +379,79 @@ class gae():
         self.model.eval()
         event_losses = []
         # A nodewise criterion
-        criterion_node = torch.nn.MSELoss(reduction='none') # This 
+        criterion_node = torch.nn.MSELoss(reduction='none')  
+        criterion_edge = torch.nn.MSELoss(reduction='none')
+
         with torch.no_grad():
             for batch_jets0, batch_jets1 in self.test_loader:
                 batch_jets0 = batch_jets0.to(self.torch_device)
                 batch_jets1 = batch_jets1.to(self.torch_device)             
+                if self.input_dim == 4:
+                    out1 = self.model(batch_jets0)
+                    out2 = self.model(batch_jets1)
 
-                out1 = self.model(batch_jets0)
-                out2 = self.model(batch_jets1)
+                    # 1) Nodewise loss => shape [N, F]
+                    loss1_nodewise = criterion_node(out1, batch_jets0.match) 
+                    loss2_nodewise = criterion_node(out2, batch_jets1.match)  
 
-                # 1) Nodewise loss => shape [N, F]
-                loss1_nodewise = criterion_node(out1, batch_jets0.x) 
-                loss2_nodewise = criterion_node(out2, batch_jets1.x)  
+                    # 2) Average across features => shape [N]
+                    loss1_per_node = loss1_nodewise.mean(dim=-1)
+                    loss2_per_node = loss2_nodewise.mean(dim=-1)
 
-                # 2) Average across features => shape [N]
-                loss1_per_node = loss1_nodewise.mean(dim=-1)
-                loss2_per_node = loss2_nodewise.mean(dim=-1)
+                    # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
+                    loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0)
+                    loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0)
+    
+                    # 4) Compute the combined loss for each graph and append to event_losses
+                    scores = (loss1_per_graph + loss2_per_graph)  # Shape: [G]
 
-                # 3) Aggregate nodewise losses by graph ID => shape [G], where G = number of graphs in the batch
-                loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0)
-                loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0)
+                elif self.input_dim in [1,3]:
+                    if self.input_dim == 1:
+                        target0 = batch_jets0.x[:,0].unsqueeze(1)
+                        target1 = batch_jets1.x[:,0].unsqueeze(1)
+                    elif self.input_dim == 3:
+                        target0 = batch_jets0.x
+                        target1 = batch_jets1.x
+                    # Model now returns a tuple: (node_recon, edge_pred)
+                    out1, edge_out1 = self.model(batch_jets0)
+                    out2, edge_out2 = self.model(batch_jets1)
 
-                # 4) Compute the combined loss for each graph and append to event_losses
-                scores = (loss1_per_graph + loss2_per_graph)  # Shape: [G]
+                    # 1) Compute node-wise loss (per node, per feature)
+                    loss1_nodewise = criterion_node(out1, target0)  # shape: [N, F_node]
+                    loss2_nodewise = criterion_node(out2, target1)  
+
+                    # 2) Average across node feature dimensions => shape: [N]
+                    loss1_per_node = loss1_nodewise.mean(dim=-1)
+                    loss2_per_node = loss2_nodewise.mean(dim=-1)
+
+                    # 3) Aggregate node losses by graph ID => shape: [G] (G = # graphs in batch)
+                    loss1_per_graph = scatter_mean(loss1_per_node, batch_jets0.batch, dim=0)
+                    loss2_per_graph = scatter_mean(loss2_per_node, batch_jets1.batch, dim=0)
+
+                    # 4) Compute edge-wise loss
+                    target_edge1 = batch_jets0.edge_attr 
+                    target_edge2 = batch_jets1.edge_attr 
+                    loss1_edgewise = criterion_edge(edge_out1, target_edge1)  # shape: [E, F_edge]
+                    loss2_edgewise = criterion_edge(edge_out2, target_edge2)
+
+                    # 5) Average across edge feature dimensions => shape: [E]
+                    loss1_per_edge = loss1_edgewise.mean(dim=-1)
+                    loss2_per_edge = loss2_edgewise.mean(dim=-1)
+
+                    # 6) Determine graph membership for each edge.
+                    #    We use the source node's batch id.
+                    edge_batch1 = batch_jets0.batch[batch_jets0.edge_index[0]]  # shape: [E]
+                    edge_batch2 = batch_jets1.batch[batch_jets1.edge_index[0]]
+
+                    # 7) Aggregate edge losses by graph => shape: [G]
+                    loss1_edge_per_graph = scatter_mean(loss1_per_edge, edge_batch1, dim=0)
+                    loss2_edge_per_graph = scatter_mean(loss2_per_edge, edge_batch2, dim=0)
+
+                    # 8) Combine node and edge losses per graph.
+                    #     (Optionally add weighting factors, e.g. alpha*node_loss + beta*edge_loss)
+                    scores = loss1_per_graph + loss2_per_graph + loss1_edge_per_graph + loss2_edge_per_graph
+
+
                 event_losses.extend(scores.cpu().tolist())  # Convert to list and extend
 
         plot_file = os.path.join(self.plot_path, 'val_loss_distribution.pdf')
@@ -377,11 +469,11 @@ class gae():
         p99 = np.quantile(loss_tot, 0.99) # 99% quantile
         num_bins = 75
         bins = np.linspace(0, p99, num_bins) 
-        print(f'--------------------------------')
+        #print(f'--------------------------------')
         #print the average loss
-        print(f"Average loss per event: {np.mean(loss_tot):.4f} ")
-        print(f"Quantiles for the loss per jet: {quantiles_loss}")
-        print()
+        #print(f"Average loss per event: {np.mean(loss_tot):.4f} ")
+        #print(f"Quantiles for the loss per jet: {quantiles_loss}")
+        #print()
 
         # Plot each distribution with a different color
         plt.figure(figsize=(8, 6))

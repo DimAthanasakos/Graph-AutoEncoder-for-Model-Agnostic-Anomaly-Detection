@@ -1,26 +1,53 @@
 # config file
 
-# Size of labeled data to load (i.e. number of jets). Recommended split: 80/10/10
-# The qvsg dataset has 2M jets, the ZvsQCD dataset currently has 2M jets, but we can download more if needed (although training would be tough). 
-n_train: 20000
-n_val:   1000
-n_test:  1000
+# Size of labeled data to load (i.e. number of jets).  
+n_train: 25000
+n_val:   2500
+n_test:  2500
 
-n_part: 20 # how many particles to consider in each graph/jet.
+n_part: [40] # how many particles to consider in each graph/jet.
+subjets: 0 # 0: hadrons (False), 1: subjets (True)
 
-models: ['EdgeNet']
+models: ['EdgeNet_edge']
 
 EdgeNet: 
-  graph_types: ['fully_connected'] 
+  graph_types: ['fully_connected']  # 'laman', 'fully_connected'
   batch_size: 512
   epochs: 80
+
+  learning_rate: 0.005 # 0.01 seems to be the best for the EdgeNet
+  patience: 3
+  lossname: 'MSE'
+  n_sig: 10000
+  n_bkg: 10000
+  input_dim:      3
+  
+EdgeNet_edge: 
+  graph_types: ['fully_connected']  # 'laman', 'fully_connected'
+  batch_size: 128
+  epochs: 70
 
   learning_rate: 0.01 # 0.01 seems to be the best for the EdgeNet
   patience: 3
   lossname: 'MSE'
   n_sig: 10000
   n_bkg: 10000
-  
+  input_dim:      1
+  pair_input_dim: 3
+
+HybridEdgeNet: 
+  graph_types: ['fully_connected']  # 'laman', 'fully_connected'
+  batch_size: 512
+  epochs: 50
+
+  learning_rate: 0.005 # 0.01 seems to be the best for the EdgeNet
+  patience: 3
+  lossname: 'MSE'
+  n_sig: 10000
+  n_bkg: 10000
+  input_dim:      3
+
+
 GATAE:
   graph_types: ['fully_connected']
   heads: 2
@@ -35,9 +62,9 @@ GATAE:
 
 transformer:
   batch_size: 512
-  epochs: 40
+  epochs: 20
 
-  learning_rate: 0.001 # ~0.001 seems to be the best for the transformer
+  learning_rate: 0.005 # ~0.001 seems to be the best for the transformer
   patience: 1
   lossname: 'MSE'
   n_sig: 20000
