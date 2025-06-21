@@ -5,19 +5,24 @@ import pickle
 from collections import defaultdict
 import numpy as np
 import matplotlib.pyplot as plt
+import json 
 
 import torch
 import time 
 import torch.nn as nn
 from torch_geometric.data import Data, DataListLoader
+import torch.distributed as dist
+
 from torch_geometric.loader import DataLoader #.data.DataLoader has been deprecated
 
 from torch_geometric.nn import EdgeConv, global_mean_pool, DataParallel
 import random
 sys.path.append('.')
 from base import common_base
-from models.models import EdgeNet
-import gae_train, ml_anomaly, trans_train
+from models.models import EdgeNet, RelGAE
+import gae_train, ml_anomaly
+
+
 
 #torch.manual_seed(0)
 
@@ -65,8 +70,6 @@ class MLAnalysis(common_base.CommonBase):
             print()
 
 
-            
-
     #---------------------------------------------------------------
     # Initialize config file into class members
     #---------------------------------------------------------------
@@ -78,9 +81,7 @@ class MLAnalysis(common_base.CommonBase):
         
         self.n_train = config['n_train']
         self.n_val = config['n_val']
-        self.n_test = config['n_test']
-        self.n_total = self.n_train + self.n_val + self.n_test
-        self.test_frac = 1. * self.n_test / self.n_total
+        self.n_total = self.n_train + self.n_val  
         self.val_frac  = 1. * self.n_val /  self.n_total
 
         # Initialize model-specific settings
@@ -104,7 +105,7 @@ class MLAnalysis(common_base.CommonBase):
                     print()
                     print(f'------------- Training model: {model} -------------')
                 model_settings = self.model_settings[model]
-                if model in ['EdgeNet', 'EdgeNet_edge', 'HybridEdgeNet', 'GATAE']: 
+                if model in ['EdgeNet', 'RelGAE', 'EdgeNet_edge_VGAE']: 
                     if self.graph_structures[0] == '': graph_structures = model_settings['graph_types'] 
                     else: graph_structures = self.graph_structures
                 else: graph_structures = ['']
@@ -115,7 +116,6 @@ class MLAnalysis(common_base.CommonBase):
                             'n_total': self.n_total,
                             'n_train': self.n_train,
                             'n_val': self.n_val,
-                            'n_test': self.n_test,
                             'input_dim': self.input_dim,
                             'graph_structures': graph_structures,
                             'torch_device': self.torch_device,
@@ -123,67 +123,118 @@ class MLAnalysis(common_base.CommonBase):
                             'ddp': self.ddp,
                             'ext_plot': self.ext_plot,}             
 
-                if model in ['transformer', 'transformer_graph']:
+
+                #AUC = mdl.run_anomaly()
+                if model in ['AE', 'VAE']: 
                     model_key = f'{model}'
-                    model_info_temp = model_info.copy()
-                    model_info_temp['model_key'] = model_key
-                    mdl = trans_train.ParT(model_info_temp)
-                    model = mdl.train()
-                    AUC = mdl.run_anomaly()
+                    model_info['model_key'] = model_key
+
+                    all_train_losses = []
+                    all_val_losses = []
+                    all_aucs = []
+                    all_aucs_max = []
+
+                    for run in range(self.n_runs):
+                        if self.rank==0: print(f"\n=== Run {run+1}/{self.n_runs} ===")
+                        t_st = time.time()
+                        analysis = gae_train.gae(model_info)
+                        _, best_train_loss, best_val_loss, auc, auc_max, _ = analysis.train()
+                        all_train_losses.append(best_train_loss)
+                        all_val_losses.append(best_val_loss)
+                        all_aucs.append(auc)
+                        all_aucs_max.append(auc_max)
+                        print(f'Run time: {time.time()-t_st:.2f} s\n')
 
                 else:
                     model_key = f'{model}'
                     batch_size = model_info['model_settings']['batch_size']
                     n_total = model_info['n_total']
+                    unsupervised = model_info['model_settings']['unsupervised'] if 'unsupervised' in model_info['model_settings']  else False
 
                     for graph_structure in graph_structures: 
                         regions = ['SB', 'SR']
                         for region in regions:
-                            graph_key = f'graphs_pyg_{region}__{graph_structure}_{n_part}'
+                            if graph_structure=='unique' and model in ['RelGAE', 'EdgeNet_edge_VGAE',]:
+                                edge_addition = model_info['model_settings']['edge_addition']
+                                graph_key = f'graphs_pyg_{region}__{graph_structure}_{edge_addition}_{n_part}{"_unsupervised" if unsupervised else ""}'
+                            else:
+                                graph_key = f'graphs_pyg_{region}__{graph_structure}_{n_part}{"_unsupervised" if unsupervised else ""}'
                             path = os.path.join(self.output_dir, f'{graph_key}.pt')
                             model_info[f'graph_key_{region}'] = graph_key
                             model_info[f'path_{region}'] = path
-                            print(f'graph_key_{region}: {graph_key}')
-                            print(f'path_{region}: {path}')
+                            if self.rank==0:
+                                print(f'graph_key_{region}: {graph_key}')
+                                print(f'path_{region}: {path}')
                         all_train_losses = []
                         all_val_losses = []
-                        all_test_losses = []
                         all_aucs = []
+                        all_aucs_max = []
+                        all_max_sic = []
+
                         for run in range(self.n_runs):
-                            print(f"\n=== Run {run+1}/{self.n_runs} ===")
+                            if self.rank==0: print(f"\n=== Run {run+1}/{self.n_runs} ===")
                             t_st = time.time()
                             analysis = gae_train.gae(model_info)
-                            _, best_train_loss, best_val_loss, best_test_loss, auc = analysis.train()
-                            all_train_losses.append(best_train_loss)
-                            all_val_losses.append(best_val_loss)
-                            all_test_losses.append(best_test_loss)
-                            all_aucs.append(auc)
-                            print(f'Run time: {time.time()-t_st:.2f} s\n')
-                            #model, best_train_loss, best_val_loss, best_test_loss, auc = .gae(model_info).train()
+                            _, best_train_loss, best_val_loss, auc, auc_max, max_sic = analysis.train()
 
-                        # Compute averages and standard deviations across runs.
+                            print(f'rank:{self.rank} is here')
+                            # --- Add cleanup HERE ---
+                            print(f'dist.is_initialized: {dist.is_initialized()}') # Check state
+                            if self.ddp:
+                                print(f"Rank {self.rank}: Trying to destroy process group for run {run+1}") # Added print
+                                dist.barrier()
+                                print(f"Rank {self.rank}: Destroying process group for run {run+1}") # Added print
+                                dist.destroy_process_group()
+                                print(f"Rank {self.rank}: Process group destroyed for run {run+1}. is_initialized={dist.is_initialized()}") # Check state
+                                time.sleep(2) # Add a 5-second pause
+
+                            if self.rank==0:
+                                all_train_losses.append(best_train_loss)
+                                all_val_losses.append(best_val_loss)
+                                all_aucs.append(auc)
+                                all_aucs_max.append(auc_max)
+                                all_max_sic.append(max_sic)
+                                print(f'Run time: {time.time()-t_st:.2f} s\n')
+
+                    # Compute averages and standard deviations across runs.
+                    if self.rank==0:
                         avg_train, std_train = np.round(np.mean(all_train_losses), 4), np.round(np.std(all_train_losses), 4)
                         avg_val, std_val     = np.round(np.mean(all_val_losses), 4), np.round(np.std(all_val_losses), 4)
-                        avg_test, std_test   = np.round(np.mean(all_test_losses), 4), np.round(np.std(all_test_losses), 4)
                         avg_auc, std_auc     = np.round(np.mean(all_aucs), 4), np.round(np.std(all_aucs), 4)
+                        avg_auc_max, std_auc_max = np.round(np.mean(all_aucs_max), 4), np.round(np.std(all_aucs_max), 4)
+                        avg_max_sic, std_max_sic = np.round(np.mean(all_max_sic), 4), np.round(np.std(all_max_sic), 4)
                         self.val_loss[n_part]=[avg_val, std_val]
                         self.AUC[n_part]=[avg_auc, std_auc]
-                        print(f"\n=== Summary over runs for n_part: {n_part} === ")
-                        print(f"Train Loss: mean = {avg_train:.4f}, std = {std_train:.4f}")
-                        print(f"Val Loss:   mean = {avg_val:.4f}, std = {std_val:.4f}")
-                        print(f"Test Loss:  mean = {avg_test:.4f}, std = {std_test:.4f}")
-                        print(f"AUC:        mean = {avg_auc:.4f}, std = {std_auc:.4f}")
-                        print(f'=.'*30, '\n \n')
-                        
-        print(f'val_loss: {self.val_loss}')
-        print(f'AUC: {self.AUC}') 
-        if len(self.n_part) > 1: self.plot_results()
-    
+                        summary = {
+                                    "n_part": n_part,
+                                    "Train Loss": [avg_train, std_train],
+                                    "Val Loss": [avg_val, std_val],
+                                    "Val_loss_list": all_val_losses,
+                                    "AUC": [avg_auc, std_auc],
+                                    "max_sic": [avg_max_sic, std_max_sic],
+                                    "AUC_max": [avg_auc_max, std_auc_max],
+                                    "AUC_list": all_aucs,
+                                    "max_sic_list": all_max_sic,
+                                    "AUC_max_list": all_aucs_max,
+                                }
+                        if self.rank==0:
+                            print(json.dumps(summary))
+                            
+                            print(f"\n=== Summary over runs for n_part: {n_part} === ")
+                            print(f"Train Loss: mean = {avg_train:.4f}, std = {std_train:.4f}")
+                            print(f"Val Loss:   mean = {avg_val:.4f}, std = {std_val:.4f}")
+                            print(f"AUC:        mean = {avg_auc:.4f}, std = {std_auc:.4f}")
+                            print(f"max_sic:    mean = {avg_max_sic:.4f}, std = {std_max_sic:.4f}")
+                            print(f'=.'*30, '\n \n')
+        if self.rank==0:                
+            print(f'val_loss: {self.val_loss}')
+            print(f'AUC: {self.AUC}') 
+            if len(self.n_part) > 1: self.plot_results()
+        
 
     #---------------------------------------------------------------
     # plot results vs n_part
     #---------------------------------------------------------------
-
     def plot_results(self):
         """
         Create and save three plots:

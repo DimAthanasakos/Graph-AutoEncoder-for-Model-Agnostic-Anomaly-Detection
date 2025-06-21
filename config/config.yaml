@@ -1,89 +1,76 @@
 # config file
 
 # Size of labeled data to load (i.e. number of jets).  
-n_train: 25000
-n_val:   2500
-n_test:  2500
+n_train: 80
+n_val:   10
 
-n_part: [40] # how many particles to consider in each graph/jet.
-subjets: 0 # 0: hadrons (False), 1: subjets (True)
+n_part: [10] # how many particles to consider in each graph/jet. If subjets is True, it will use the 
+             # file with n_part exclusive subjets.
+subjets: 1 # 0: hadrons (False), 1: subjets (True)
 
-models: ['EdgeNet_edge']
+models: ['RelGAE']
 
 EdgeNet: 
-  graph_types: ['fully_connected']  # 'laman', 'fully_connected'
-  batch_size: 512
-  epochs: 80
-
-  learning_rate: 0.005 # 0.01 seems to be the best for the EdgeNet
-  patience: 3
-  lossname: 'MSE'
-  n_sig: 10000
-  n_bkg: 10000
-  input_dim:      3
-  
-EdgeNet_edge: 
-  graph_types: ['fully_connected']  # 'laman', 'fully_connected'
-  batch_size: 128
-  epochs: 70
-
-  learning_rate: 0.01 # 0.01 seems to be the best for the EdgeNet
-  patience: 3
-  lossname: 'MSE'
-  n_sig: 10000
-  n_bkg: 10000
-  input_dim:      1
-  pair_input_dim: 3
-
-HybridEdgeNet: 
-  graph_types: ['fully_connected']  # 'laman', 'fully_connected'
+  graph_types: ['fully_connected']  # this breaks if you use anything else, only 'fully_connected' works
   batch_size: 512
   epochs: 50
 
   learning_rate: 0.005 # 0.01 seems to be the best for the EdgeNet
-  patience: 3
+
   lossname: 'MSE'
   n_sig: 10000
   n_bkg: 10000
   input_dim:      3
 
+  unsupervised: True
+  s_over_b: 0.01 # ONLY used for the unsupervised training
 
-GATAE:
-  graph_types: ['fully_connected']
-  heads: 2
-  batch_size: 512
-  epochs: 7
+RelGAE: 
+  graph_types: ['laman']  # 'laman', 'fully_connected', 'unique'
+  batch_size: 1
+  epochs: 2
 
-  learning_rate: 0.001
-  patience: 3
+  learning_rate: 0.003 # 0.003 works well for the EdgeNet_edge
+
+  lossname: 'MSE'
+  n_sig: 15000    # used for the testing 
+  n_bkg: 15000    # used for the testing 
+
+  input_dim:      1 # Be careful about the input_dim, it should be 1 for the RelGAE
+  pair_input_dim: 3 # If you want to add a 4th, be very careful about the calculation
+                    # of the mass, are the other features normalized before calculating the mass, etc
+
+  edge_addition: 6
+  angles: 6
+
+  unsupervised: True # If false, it will train on the sidebands and test in SR. 
+                     # Does not improve performance for s/b < 0.03
+  s_over_b: 0.03 # ONLY used for the unsupervised training
+
+
+AE:  #  high level features
+  batch_size: 128
+  epochs: 25
+
+  learning_rate: 0.0005
+
   lossname: 'MSE'
   n_sig: 10000
   n_bkg: 10000
+  input_dim:      3 #  number of features, options are 3 or 5 
 
-transformer:
-  batch_size: 512
-  epochs: 20
+  unsupervised: False
 
-  learning_rate: 0.005 # ~0.001 seems to be the best for the transformer
-  patience: 1
+VAE:  #  high level features
+  batch_size: 1024
+  epochs: 50
+
+  learning_rate: 0.0001
+
   lossname: 'MSE'
-  n_sig: 20000
-  n_bkg: 20000
-  input_dim:      3
-  pair_input_dim: 3
-  
+  n_sig: 5000
+  n_bkg: 5000
+  input_dim:      3 # options are 3 or 5
 
-transformer_graph:
-  batch_size: 512
-  epochs: 10
-
-  learning_rate: 0.001 # 0.001 seems to be the best for the transformer
-  patience: 1
-  lossname: 'MSE'
-  n_sig: 10000
-  n_bkg: 10000
-
-  graph: 'laman_knn_graph'
-  input_dim:      3
-  pair_input_dim: 3
-  add_angles: 0 
+  s_over_b: 0.01
+  kl_weight: 0.0002 
