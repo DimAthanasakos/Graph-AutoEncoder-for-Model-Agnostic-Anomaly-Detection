@@ -1,12 +1,12 @@
 # Graph Autoencoders for Model Agnostic Anomaly Detection
 
 
-This repo construct various Graph Autoencoders (with and without attention) for model-agnostic anomaly detection at particle collisions. It's currently set up to work out of the box using the LHC Olympics RnD ["dataset"](https://zenodo.org/records/6466204). It's trained using the sideband  region (SB), effectively learning the dof of the background data (QCD), and then tested on separating signal vs background in the signal region (SR). 
+This repo the Graph Autoencoder from the Paper 'Graph theory inspired anomaly detection at the LHC', along with a couple of others simple architectures, for model-agnostic anomaly detection at particle collisions. It's currently set up to work out of the box using the LHC Olympics RnD ["dataset"](https://zenodo.org/records/6466204) if you download it locally. If you want to use subjets as the input, you'll have to cluster the jets using the process_subjet.py, using the library ["heppy"](https://github.com/cbernet/heppy) that requires a careful environment initialization, as seen by init_perlmutter_heppy.sh. 
+The autoencoder can be trainer either in unsupervised manner or in a weakly supervised using the sideband  region (SB). For more info look at the config script and the steer_analysis.py parser arguments.
 
-To run the model, change the parameters of the config.yaml file accordingly and run: 
+To run the model, change the parameters of the config.yaml file and run: 
 ```bash
-python analysis/steer_analysis.py --regenerate_graphs
+python python -u analysis/steer_analysis.py -c config/config.yaml
 ``` 
-where the --regenerate_graphs choice is optional once the graphs (PyG) have been constructed and saved. 
 
-Check the steer_analysis script for more details.
+The general pipeline is: steer analysis -> ml_analysis -> gae_train, ml_anonaly. Utils.py contain many useful functions, including for loading and preprocessing the data. 

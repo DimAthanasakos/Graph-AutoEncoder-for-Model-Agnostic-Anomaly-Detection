@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 
 """
-The graph_constructor module constructs the input graphs to the ML analysis:
-    - graphs_numpy_subjet.h5: builds graphs from JFN output subjets_unshuffled.h5
-    - graphs_pyg_subjet__{graph_key}.pt: builds PyG graphs from subjet_graphs_numpy.h5
-    - graphs_pyg_particle__{graph_key}.pt: builds PyG graphs from energyflow dataset
+Using many things from V. Mikuni: https://github.com/ViniciusMikuni/LHCO_diffusion
 """
 
 import os
@@ -171,68 +168,6 @@ def angles_laman(x, mask, angles = 0, pairwise_distance = None):
             angles_to_add = min(angles, max_angles)
             mask[b, row_indices[:angles_to_add], col_indices[:angles_to_add]] = True
         
-    # Summing True values for each tensor in the batch
-    sum_true_per_batch = torch.sum(mask, dim=[1, 2])  # Sum over the last two dimensions
-
-    # Calculating the average number of True values across the batch
-    average_true = torch.mean(sum_true_per_batch.float())  # Convert to float for mean calculation
-
-    # print(f'average_true: {average_true:.2f}')
-
-    # if True: 
-    #     tot_2n3 = 0
-    #     tot_n = 0 
-    #     total_n1=0
-    #     tot_n2 = 0
-    #     total_3n = 0
-    #     for b in range(batch_size):
-    #         edges = torch.sum(mask[b], dim=[0, 1])
-    #         tot_2n3 += edges / (2*valid_n[b]-3)
-    #         tot_n += edges / valid_n[b]
-    #         tot_n2 += edges / (1/2*valid_n[b]*(valid_n[b]-1))
-    #         total_n1 += edges / (valid_n[b]-1)
-    #         total_3n += edges / (3*valid_n[b]-6)
-
-    #     av_2n3 = tot_2n3 / batch_size
-    #     av_n = tot_n / batch_size
-    #     av_n1 = total_n1 / batch_size
-    #     av_n2 = tot_n2 / batch_size
-    #     av_3n = total_3n / batch_size
-
-    #     if 2 * sum_true_per_batch[b] > valid_n[b]*(valid_n[b]-1) :
-    #         print('found a graph with more than 100% connectivity')
-    #         print(f'valid_n[b] = {valid_n[b]}')
-    #         print(f'edges = {sum_true_per_batch[b] }')
-    #         print(f'sum_true_per_batch[b]/valid_n[b]^2 * 2 = {2 * sum_true_per_batch[b] / ( valid_n[b]*(valid_n[b]-1) ) }')
-
-    #     print(f'After addition')
-    #     print(f"Average number of edges = {average_true.item()}")
-    #     #print(f'edges/2n-3 = {average_true.item()/(2*torch.mean(valid_n_f)-3)}')
-    #     print(f'actual edges/2n-3 = {av_2n3}')
-    #     print()
-    #     print(f'actual edges/(3n-6) = {av_3n:.4f}')
-    #     print()
-    #     #print(f'edges/n = {average_true.item()/(torch.mean(valid_n_f))}')
-    #     print(f'actual edges/n = {av_n}')
-    #     print()
-    #     print(f'actual edges/n-1= {av_n1}')
-    #     print()
-    #     #print(f'edges/(n^2/2) = {average_true.item()/(1/2*torch.mean(valid_n_f)**2)}')
-    #     print(f'actual edges/(n^2/2) = {av_n2}')
-
-    #     print()
-               
-    # print(f'mask.shape: {mask.shape}')
-    # print(f'mask[0]: {mask[0]}')
-    # print()
-    # print(f'mask[1]: {mask[1]}')
-    # print()
-    # print(f'mask[2]: {mask[2]}')
-    # print()
-    # print(f'mask[3]: {mask[3]}')
-    # print()
-    # print(f'mask[4]: {mask[4]}')
-
     return mask 
 
 def unique_graph(x, angles=0, extra_info=False, num_edges=3):
@@ -315,8 +250,6 @@ def unique_graph(x, angles=0, extra_info=False, num_edges=3):
 
 # Create a Laman Graph using a mod of the k nearest neighbors algorithm.
 def laman_knn(x, angles = 0, extra_info = False):   
-    # check if x is a numpy array, if not convert it to a numpy array
-    #device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if isinstance(x, np.ndarray):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         x = torch.from_numpy(x).to(device)
@@ -390,12 +323,7 @@ def laman_knn(x, angles = 0, extra_info = False):
     bool_mask = angles_laman(x, bool_mask, angles, pairwise_distance = pairwise_distance) 
 
     # Make the Laman Edges bidirectional 
-    # print(f'bool_mask before bidirectional')
-    # print(f'bool_mask.shape: {bool_mask.shape}')
-    # print(f'bool_mask[0]: {bool_mask[0]}')
     bool_mask = bool_mask | bool_mask.transpose(1, 2)
-    # print()
-    # print(f'bool_mask[0]: {bool_mask[0]}')
 
     bool_mask = bool_mask.cpu()
 
@@ -462,10 +390,6 @@ def _preprocessing(particles, save_json=True, norm = 'mean', scaled = False):
             mask = particles[:,-1]
             mean_particle = np.average(particles[:,:-1],axis=0,weights=mask)
             std_particle = np.sqrt(np.average((particles[:,:-1] - mean_particle)**2,axis=0,weights=mask))
-            #print(f'===============================')
-            #print(f'mean_particle: {mean_particle}')
-            #print(f'std_particle: {std_particle}')
-            #print(f'===============================')
             data_dict = {
                     'max_particle':np.max(particles[:,:-1],0).tolist(),
                     'min_particle':np.min(particles[:,:-1],0).tolist(),
@@ -484,10 +408,6 @@ def _preprocessing(particles, save_json=True, norm = 'mean', scaled = False):
         else:
             print("ERROR: give a normalization method!")
         particles = particles.reshape(batch_size,2,n_part,-1)
-
-        #print(f'particles.shape: {particles.shape}')
-        #print(f'particles[0, :, :5, :3]: ') 
-        #print(particles[0, :, :5, :3])
 
         return particles.astype(np.float32),
 
@@ -631,10 +551,6 @@ def DataLoader(n_events,
     # for unsupervised, we use the full mjj range since we do not do a split of SB and SR 
 
     jets[:,:,-1][jets[:,:,-1]<0] = 0.
-
-    # should we preprocess the data before constructing the graphs?
-    #particles, jets = _preprocessing(particles, jets, mjj)
-    #mjj = prep_mjj(mjj, mjjmin, mjjmax)
 
     return particles[:nevts], jets[:nevts], mjj[:nevts]
 
