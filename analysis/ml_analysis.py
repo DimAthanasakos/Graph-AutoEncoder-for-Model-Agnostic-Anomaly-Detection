@@ -32,7 +32,7 @@ class MLAnalysis(common_base.CommonBase):
     #---------------------------------------------------------------
     # Constructor
     #---------------------------------------------------------------
-    def __init__(self, config_file='', output_dir='', ddp=False, models = None, ext_plot=False, n_part=-1, input_dim=-1, n_runs = 1, graph_structures=[''], **kwargs):
+    def __init__(self, config_file='', output_dir='', ddp=False, models = None, ext_plot=False, n_part=-1, input_dim=-1, n_runs = 1, graph_structures=[''], compile_flag=True, subjets=False, **kwargs):
         super(common_base.CommonBase, self).__init__(**kwargs)
         
         self.config_file = config_file
@@ -44,6 +44,8 @@ class MLAnalysis(common_base.CommonBase):
         self.input_dim = input_dim
         self.n_runs = n_runs
         self.graph_structures = graph_structures
+        self.compile_flag = compile_flag
+        self.subjets = subjets
 
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
@@ -121,7 +123,9 @@ class MLAnalysis(common_base.CommonBase):
                             'torch_device': self.torch_device,
                             'output_dir': self.output_dir,
                             'ddp': self.ddp,
-                            'ext_plot': self.ext_plot,}             
+                            'ext_plot': self.ext_plot,
+                            'compile': self.compile_flag,
+                            'subjets': self.subjets,}             
 
 
                 #AUC = mdl.run_anomaly()
@@ -153,12 +157,13 @@ class MLAnalysis(common_base.CommonBase):
 
                     for graph_structure in graph_structures: 
                         regions = ['SB', 'SR']
+                        data_mode = 'subjet' if self.subjets else 'particle'
                         for region in regions:
-                            if graph_structure=='unique' and model in ['RelGAE', 'EdgeNet_edge_VGAE',]:
+                            if graph_structure in ['unique', 'knn'] and model in ['RelGAE', 'EdgeNet_edge_VGAE',]:
                                 edge_addition = model_info['model_settings']['edge_addition']
-                                graph_key = f'graphs_pyg_{region}__{graph_structure}_{edge_addition}_{n_part}{"_unsupervised" if unsupervised else ""}'
+                                graph_key = f'graphs_pyg_{region}__{graph_structure}_{data_mode}_{edge_addition}_{n_part}{"_unsupervised" if unsupervised else ""}'
                             else:
-                                graph_key = f'graphs_pyg_{region}__{graph_structure}_{n_part}{"_unsupervised" if unsupervised else ""}'
+                                graph_key = f'graphs_pyg_{region}__{graph_structure}_{data_mode}_{n_part}{"_unsupervised" if unsupervised else ""}'
                             path = os.path.join(self.output_dir, f'{graph_key}.pt')
                             model_info[f'graph_key_{region}'] = graph_key
                             model_info[f'path_{region}'] = path

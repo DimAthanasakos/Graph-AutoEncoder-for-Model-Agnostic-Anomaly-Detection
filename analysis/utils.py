@@ -23,6 +23,10 @@ from sklearn.utils import shuffle
 import time
 import math 
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 
 def SetStyle():
     from matplotlib import rc
@@ -170,7 +174,7 @@ def angles_laman(x, mask, angles = 0, pairwise_distance = None):
         
     return mask 
 
-def unique_graph(x, angles=0, extra_info=False, num_edges=3):
+def unique_graph(x, extra_info=False, num_edges=3):
     print(f'unique_graph with num_edges: {num_edges}')
     # Convert x to tensor if it's a numpy array
     if isinstance(x, np.ndarray):
@@ -238,10 +242,82 @@ def unique_graph(x, angles=0, extra_info=False, num_edges=3):
     final_mask = mask | mask.transpose(1, 2)
     bool_mask = bool_mask & ~final_mask
 
-    # Call the angles_laman function (if defined) to remove some angles at random, if desired
-    bool_mask = angles_laman(x, bool_mask, angles, pairwise_distance=pairwise_distance)
 
     # Make edges bidirectional
+    bool_mask = bool_mask | bool_mask.transpose(1, 2)
+
+    return bool_mask.cpu()
+
+def knn_graph(x, extra_info=False, k_neighbors=4):
+    """
+    Build a symmetric k-nearest-neighbour graph using (eta, phi) distances.
+    """
+    print(f'knn_graph with k_neighbors: {k_neighbors}')
+
+    if isinstance(x, np.ndarray):
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        x = torch.from_numpy(x).to(device)
+    else:
+        device = x.device
+
+    batch_size, _, _, num_particles = x.size()
+    x = x.reshape(2 * batch_size, -1, num_particles)
+    batch_size = 2 * batch_size
+
+    # Work in (eta, phi) space, matching the distance heuristic used by the
+    # unique graph but without separating out the leading particles.
+    _, rapidity, phi = x.split((1, 1, 1), dim=1)
+    pos = torch.cat((rapidity, phi), dim=1)
+
+    non_zero_particles = torch.norm(pos, p=2, dim=1) != 0
+    valid_n = non_zero_particles.sum(dim=1)
+
+    inner = -2 * torch.matmul(pos.transpose(2, 1), pos)
+    xx = torch.sum(pos ** 2, dim=1, keepdim=True)
+    pairwise_distance = -xx - inner - xx.transpose(2, 1)
+
+    diag_mask = torch.eye(num_particles, dtype=torch.bool, device=device).unsqueeze(0)
+    pairwise_distance = pairwise_distance.masked_fill(diag_mask, float('-inf'))
+
+    particle_idx = torch.arange(num_particles, device=device).view(1, -1)
+    invalid_particles = particle_idx >= valid_n.unsqueeze(1)
+    if invalid_particles.any():
+        pairwise_distance = pairwise_distance.masked_fill(invalid_particles.unsqueeze(2), float('-inf'))
+        pairwise_distance = pairwise_distance.masked_fill(invalid_particles.unsqueeze(1), float('-inf'))
+
+    k_neighbors = max(0, min(k_neighbors, num_particles - 1))
+    bool_mask = torch.zeros((batch_size, num_particles, num_particles), dtype=torch.bool, device=device)
+
+    if k_neighbors > 0:
+        # Unlike unique_graph we simply take the k highest scores (closest
+        # neighbours) for each source row. There is no triangular masking that
+        # enforces ordering between particles.
+        knn_indices = pairwise_distance.topk(k=k_neighbors, dim=-1).indices
+        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, num_particles)
+        src_particle_indices = torch.arange(num_particles, device=device).view(1, -1).expand(batch_size, -1)
+        valid_src = src_particle_indices < valid_n.unsqueeze(1)
+
+        for neighbor_rank in range(k_neighbors):
+            current_indices = knn_indices[:, :, neighbor_rank]
+            valid_dst = current_indices < valid_n.unsqueeze(1)
+            valid_connections = valid_src & valid_dst
+            if valid_connections.any():
+                bool_mask[batch_indices[valid_connections],
+                          src_particle_indices[valid_connections],
+                          current_indices[valid_connections]] = True
+
+    # Mirror the directed k-NN selections so that even one-sided choices become
+    # undirected edges, then drop duplicate entries by keeping only the lower triangle.
+    bool_mask = bool_mask | bool_mask.transpose(1, 2)
+    mask_lower = torch.tril(torch.ones(num_particles, num_particles, dtype=torch.bool, device=device), diagonal=-1)
+    bool_mask = bool_mask & mask_lower.unsqueeze(0)
+
+    range_tensor = torch.arange(num_particles, device=device).unsqueeze(0).unsqueeze(-1)
+    expanded_valid_n = valid_n.unsqueeze(-1).unsqueeze(-1)
+    mask = (range_tensor >= expanded_valid_n)
+    final_mask = mask | mask.transpose(1, 2)
+    bool_mask = bool_mask & ~final_mask
+
     bool_mask = bool_mask | bool_mask.transpose(1, 2)
 
     return bool_mask.cpu()
@@ -674,16 +750,35 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     global_observables = None
-    print(f'subjets = {subjets}')
+    print(f'subjets = {subjets}, unsupervised = {unsupervised}, use_SR = {use_SR}')
     # Load data
     if not subjets: 
+        background_target = 120000
+        signal_target = 30000
         if not use_SR: # SB
-            particles, jets, mjj = DataLoader(n_events=n_events, rank=rank, n_part=n_part)
+            sb_events = background_target if unsupervised else n_events
+            particles, jets, mjj = DataLoader(n_events=sb_events, rank=rank, n_part=n_part, unsupervised=unsupervised)
+            if unsupervised and len(particles) > background_target:
+                particles = particles[:background_target]
             labels = [0]*len(particles)       
         else:          # SR
-            if unsupervised: n_dataset = n_events
-            else: n_dataset = 10000
-            _, particles, _, labels = class_loader(use_SR=True, nbkg = n_dataset, nsig = n_dataset, n_part=n_part)
+            if unsupervised:
+                nbkg = background_target
+                nsig = signal_target
+                _, particles, _, labels = class_loader(use_SR=True, nbkg = nbkg, nsig = nsig, n_part=n_part, unsupervised=True)
+                if len(particles) > (nbkg + nsig):
+                    particles = particles[:nbkg + nsig]
+                    labels = labels[:nbkg + nsig]
+            else:
+                nbkg = nsig = 10000
+                _, particles, _, labels = class_loader(use_SR=True, nbkg = nbkg, nsig = nsig, n_part=n_part, unsupervised=False)
+        if rank == 0:
+            label_arr = np.array(labels)
+            if label_arr.ndim == 2:
+                label_arr = label_arr[:, 0]
+            n_bkg_loaded = np.sum(label_arr == 0)
+            n_sig_loaded = np.sum(label_arr == 1)
+            print(f'Loaded particle-level sample: {n_bkg_loaded} bkg, {n_sig_loaded} sig')
     
     if subjets: 
         if unsupervised: 
@@ -722,23 +817,102 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
     print(f'labels shape: {len(labels)}')
     if global_observables is not None: print(f'Global observables shape: {global_observables.shape}')
 
-    if graph_structure == 'unique':
-        if use_SR: graph_key = f'SR__{graph_structure}_{num_edges}_{n_part}{"_unsupervised" if unsupervised else ""}'
-        else: graph_key = f'SB__{graph_structure}_{num_edges}_{n_part}{"_unsupervised" if unsupervised else ""}'
+    data_mode = 'subjet' if subjets else 'particle'
+    if graph_structure in ['unique', 'knn']:
+        if use_SR: graph_key = f'SR__{graph_structure}_{data_mode}_{num_edges}_{n_part}{"_unsupervised" if unsupervised else ""}'
+        else: graph_key = f'SB__{graph_structure}_{data_mode}_{num_edges}_{n_part}{"_unsupervised" if unsupervised else ""}'
     else:
-        if use_SR: graph_key = f'SR__{graph_structure}_{n_part}{"_unsupervised" if unsupervised else ""}'
-        else: graph_key = f'SB__{graph_structure}_{n_part}{"_unsupervised" if unsupervised else ""}'
+        if use_SR: graph_key = f'SR__{graph_structure}_{data_mode}_{n_part}{"_unsupervised" if unsupervised else ""}'
+        else: graph_key = f'SB__{graph_structure}_{data_mode}_{n_part}{"_unsupervised" if unsupervised else ""}'
 
-    # preprocess the data before constructing the fully connected graphs 
-    particles_old = particles
-    particles, = _preprocessing(particles, norm = 'mean', scaled = True)
+    # preprocess the data before constructing the graphs
+    # Each event has 2 jets, and as can been seen from data_processing.ipynb, we have normalized 
+    # the particles on each jet by: pt-pt_jet, eta-eta_jet, phi/phi_jet. 
+    # This has led to the features practically having a range of [-1,1] for eta and phi. 
+    # In order to increase the range of the features, we scale the features by this procedure:
+    particles_old = particles.copy()
+    mask = (np.linalg.norm(particles_old, axis=-1, keepdims=True) > 0).astype(particles_old.dtype)
+    particles_with_mask = np.concatenate([particles, mask], axis=-1)
+    particles_scaled_with_mask, = _preprocessing(particles_with_mask, norm = 'mean', scaled = True)
+    particles = particles_scaled_with_mask[..., :-1]
 
     total_size = particles.shape[0]
     chunk_size = 1024*8
     chunks = (total_size - 1) // chunk_size + 1
     n_part = particles.shape[2]
     final_graph_list = []
+    inspect_debug = True 
+    debug_done = False
     
+    # Plot eta/phi distributions before constructing graphs
+    if particles_old.shape[-1] >= 3:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        results_dir = os.path.join(project_root, 'Plots')
+        os.makedirs(results_dir, exist_ok=True)
+
+        def plot_eta_phi(feature_array, bins_eta, bins_phi, color, label_suffix, xlabel_suffix=''):
+            valid_mask = np.linalg.norm(feature_array, axis=-1) > 0
+            if not np.any(valid_mask):
+                return
+            eta_values = feature_array[..., 1][valid_mask]
+            phi_values = feature_array[..., 2][valid_mask]
+            if eta_values.size == 0 or phi_values.size == 0:
+                return
+
+            if bins_eta is None:
+                eta_min, eta_max = eta_values.min(), eta_values.max()
+                bins_eta_use = np.linspace(eta_min, eta_max, 60)
+            else:
+                bins_eta_use = bins_eta
+
+            if bins_phi is None:
+                phi_min, phi_max = phi_values.min(), phi_values.max()
+                bins_phi_use = np.linspace(phi_min, phi_max, 60)
+            else:
+                bins_phi_use = bins_phi
+
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+            axes[0].hist(eta_values, bins=bins_eta_use, histtype='step', color=color, linewidth=1.25)
+            axes[0].set_xlabel(fr'$\eta{xlabel_suffix}$')
+            axes[0].set_ylabel('Counts')
+            axes[0].set_title(f'Eta Distribution{xlabel_suffix}')
+            axes[0].set_yscale('log')
+            
+
+            axes[1].hist(phi_values, bins=bins_phi_use, histtype='step', color=color, linewidth=1.25)
+            axes[1].set_xlabel(fr'$\phi{xlabel_suffix}$')
+            axes[1].set_title(f'Phi Distribution{xlabel_suffix}')
+            axes[1].set_yscale('log')
+
+            fig.tight_layout()
+            plot_path = os.path.join(results_dir, f'eta_phi_distribution{label_suffix}_{graph_key}.png')
+            fig.savefig(plot_path, dpi=200)
+            plt.close(fig)
+            print(f'Saved eta/phi distribution plot to {plot_path}')
+
+        # Original (unscaled) features
+        original_feats = particles_old[..., :3]
+        bins_eta_default = np.linspace(-1.5, 1.5, 60)
+        bins_phi_default = np.linspace(-np.pi, np.pi, 60)
+        plot_eta_phi(
+            feature_array=original_feats,
+            bins_eta=bins_eta_default,
+            bins_phi=bins_phi_default,
+            color='dimgray',
+            label_suffix='',
+        )
+
+        # Scaled features used for graph construction
+        scaled_feats = particles[..., :3]
+        plot_eta_phi(
+            feature_array=scaled_feats,
+            bins_eta=None,
+            bins_phi=None,
+            color='royalblue',
+            label_suffix='_scaled',
+            xlabel_suffix=' (scaled)'
+        )
+
     for i in range(chunks):
         start_idx = i * chunk_size
         end_idx = min((i + 1) * chunk_size, total_size)
@@ -796,7 +970,7 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
                     
                 graph_list.append(event_graphs)
 
-        elif graph_structure in ['laman', 'unique']:
+        elif graph_structure in ['laman', 'unique', 'knn']:
             # Convert the particles array to a torch tensor on the target device. particles shape: (6000, 2, 10, 4)
             particles_t = torch.tensor(prtcls, dtype=torch.float, device=device)
             # Use only the first 3 features for each particle.
@@ -808,7 +982,9 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
             if graph_structure == 'laman':
                 bool_mask = laman_knn(particles_t, angles = angles)
             elif graph_structure == 'unique':
-                bool_mask = unique_graph(particles_t, angles = angles, num_edges=num_edges)
+                bool_mask = unique_graph(particles_t, num_edges=num_edges)
+            elif graph_structure == 'knn':
+                bool_mask = knn_graph(particles_t, k_neighbors=num_edges)
             # We expect bool_mask to have shape (12000, 10, 10) (one 10x10 mask for each jet).
             # Reshape it back so that it is grouped by event:
             bool_mask = bool_mask.reshape(particles_t.size(0), particles_t.size(1), particles_t.size(-1), particles_t.size(-1))
@@ -857,6 +1033,33 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
                         data.global_features = torch.tensor(jet_global_obs, dtype=torch.float).to(device)
 
                     event_graphs.append(data)
+
+                    if inspect_debug and not debug_done and event_idx < 2:
+                        jet_tensor = particles_t[event_idx, jet_idx]
+                        valid_mask = torch.norm(jet_tensor, dim=0) > 0
+                        eta_phi = jet_tensor[1:3, valid_mask].transpose(0, 1).detach().cpu().numpy()
+                        if eta_phi.size > 0:
+                            eta_vals = eta_phi[:, 0]
+                            phi_vals = eta_phi[:, 1]
+                            delta_eta_np = eta_vals[:, None] - eta_vals[None, :]
+                            delta_phi_np = phi_vals[:, None] - phi_vals[None, :]
+                            delta_phi_np = (delta_phi_np + np.pi) % (2 * np.pi) - np.pi
+                            dist_matrix = np.sqrt(delta_eta_np ** 2 + delta_phi_np ** 2)
+                            cpu_adj = bool_mask[event_idx, jet_idx].detach().cpu()
+                            cpu_valid = valid_mask.detach().cpu()
+                            adj_matrix = cpu_adj[cpu_valid][:, cpu_valid].numpy().astype(int)
+                            print('\n' + '='*80)
+                            print(f'KNN Debug | Event {event_idx}, Jet {jet_idx}')
+                            print('η-φ coordinates (valid particles):')
+                            print(np.round(eta_phi, 4))
+                            print('\nPairwise ΔηΔφ distances:')
+                            print(np.round(dist_matrix, 4))
+                            print('\nAdjacency matrix (after symmetrisation):')
+                            print(adj_matrix)
+                            print('='*80 + '\n')
+                            time.sleep(2)
+                        if event_idx == 1 and jet_idx == 1:
+                            debug_done = True
                 graph_list.append(event_graphs)
 
         final_graph_list.extend(graph_list)
@@ -868,5 +1071,6 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
 
     torch.save(final_graph_list, graph_filename)
     print(f'Saved PyG graphs to {graph_filename}.')
+
 
 

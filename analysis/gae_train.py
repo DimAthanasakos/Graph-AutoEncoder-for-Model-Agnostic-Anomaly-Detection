@@ -95,6 +95,8 @@ class gae():
         if 'graph_types' in self.model_info['model_settings']:
             self.graph_structure = self.model_info['model_settings']['graph_types'][0]
         
+        self.use_compile = model_info.get('compile', True)
+
         if self.lossname == 'MSE': self.criterion = torch.nn.MSELoss()
         else: sys.exit(f'Error: loss {self.lossname} not recognized.')
 
@@ -378,7 +380,8 @@ class gae():
         else: sys.exit(f'Error: model {self.model_to_choose} not recognized.') 
         
         #########################################
-        model = torch.compile(model)
+        if self.use_compile:
+            model = torch.compile(model)
         #########################################
         
         # Print the model architecture if master process
@@ -423,7 +426,7 @@ class gae():
             #loss_val, loss_kl_val = 0, 0 
             if self.rank==0:
                 self.val_loss_list.append(loss_val)
-                if epoch%10==0 or self.ext_plot:
+                if epoch%5==0 or self.ext_plot:
                     auc, max_sic = anomaly_model.run(model=self.model)
                     self.auc_list.append(auc)
                     self.max_sic_list.append(max_sic)
