@@ -1,12 +1,15 @@
 # config file
 
 # Size of labeled data to load (i.e. number of jets).  
-n_train: 80
-n_val:   10
+n_train: 35000
+n_val:   5000
 
-n_part: [10] # how many particles to consider in each graph/jet. If subjets is True, it will use the 
+n_part: [30] # how many particles to consider in each graph/jet. If subjets is True, it will use the 
              # file with n_part exclusive subjets.
+
 subjets: 1 # 0: hadrons (False), 1: subjets (True)
+
+dataset_type: 'qqq' # 'qq' or 'qqq'. The signal dataset from the LHCO dataset. The standard RnD is qq.
 
 models: ['RelGAE']
 
@@ -26,26 +29,27 @@ EdgeNet:
   s_over_b: 0.01 # ONLY used for the unsupervised training
 
 RelGAE: 
-  graph_types: ['laman']  # 'laman', 'fully_connected', 'unique'
-  batch_size: 1
-  epochs: 2
+  graph_types: ['laman']  # 'laman', 'fully_connected', 'unique', 'knn'
+  batch_size: 512
+  epochs: 50
 
   learning_rate: 0.003 # 0.003 works well for the EdgeNet_edge
 
   lossname: 'MSE'
-  n_sig: 15000    # used for the testing 
-  n_bkg: 15000    # used for the testing 
+  n_sig: 15000       # used for the testing 
+  n_bkg: 15000       # used for the testing 
 
-  input_dim:      1 # Be careful about the input_dim, it should be 1 for the RelGAE
-  pair_input_dim: 3 # If you want to add a 4th, be very careful about the calculation
-                    # of the mass, are the other features normalized before calculating the mass, etc
+  input_dim:      1  # Be careful about the input_dim, it should be 1 for the RelGAE
+  pair_input_dim: 3  # If you want to add a 4th, be very careful about the calculation
+                     # of the mass, are the other features normalized before calculating the mass? etc
 
-  edge_addition: 6
-  angles: 6
+  edge_addition: 6   # If the graph is the unique-k graph or the knn graph, this is the k value
+  angles: 0          # Only used for the Laman Perturbation graph
 
   unsupervised: True # If false, it will train on the sidebands and test in SR. 
                      # Does not improve performance for s/b < 0.03
-  s_over_b: 0.03 # ONLY used for the unsupervised training
+  s_over_b: 0.03     # ONLY used for the unsupervised training. Technically this corresponds to s/(s+b) in the code, i.e. if you set this param to 0.5
+                    # the dataset will have Ns = Nb
 
 
 AE:  #  high level features

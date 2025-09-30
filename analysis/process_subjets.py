@@ -11,6 +11,7 @@ import sys
 import glob
 from sklearn.preprocessing import StandardScaler
 from collections import defaultdict
+import argparse
 
 import utils
 # Fastjet via python (from external library heppy)
@@ -33,7 +34,7 @@ import energyflow as ef
 
 class process_subjets():
 
-    def __init__(self, base_dir, use_SR=False, n_events=10000, N_cluster_list=[10], only_obs=False, classification_task = 'rnd', compute_subjets_and_global_obs=False, unsupervised=False): # Added new flag
+    def __init__(self, base_dir, use_SR=False, n_events=10000, N_cluster_list=[10], only_obs=False, classification_task = 'rnd', compute_subjets_and_global_obs=False, unsupervised=False, dataset_type='qq'): # Added new flag
         # Determine the filename based on whether use_SR is True or False.
         filename = 'SR.h5' if use_SR else 'SB.h5'
         # Create the full file path by joining the base directory and filename.
@@ -46,6 +47,8 @@ class process_subjets():
         self.n_events = n_events
         self.N_cluster_list = N_cluster_list
         self.only_obs = only_obs
+
+        print(f'n_events: {n_events}')
 
         # classification_task
         self.classification_task = classification_task
@@ -60,7 +63,7 @@ class process_subjets():
 
         self.output = defaultdict(list)
 
-        self.init_data(use_SR=use_SR, n_events=n_events,unsupervised = self.unsupervised) # Pass jets_raw to init_data if needed later
+        self.init_data(use_SR=use_SR, n_events=n_events,unsupervised = self.unsupervised, dataset_type=dataset_type) # Pass jets_raw to init_data if needed later
 
         # Ensure the parent directory exists.
         parent_dir = os.path.dirname(self.file_path)
@@ -79,11 +82,12 @@ class process_subjets():
             print('-------------------------------------\n')
 
     #---------------------------------------------------------------
-    def init_data(self, use_SR, n_events, unsupervised = False):
+    def init_data(self, use_SR, n_events, unsupervised = False, dataset_type='qq'):
         if unsupervised:
             nbkg = n_events
-            nsig = 30000
-            jets_raw, X, mjj, self.Y = utils.class_loader(nbkg=nbkg, nsig=nsig, unsupervised=True)
+            nsig = n_events
+            print(f'Loading data for unsupervised mode with nbkg: {nbkg}, nsig: {nsig}')
+            jets_raw, X, mjj, self.Y = utils.class_loader(nbkg=nbkg, nsig=nsig, unsupervised=True, dataset_type=dataset_type)
 
         else: 
             if not use_SR:
@@ -92,9 +96,10 @@ class process_subjets():
             else:
                 n_dataset = 50000
                 # Ensure class_loader also returns X and jets_raw correctly
-                jets_raw, X, mjj, self.Y = utils.class_loader(use_SR=True, nbkg=n_dataset, nsig=n_dataset, unsupervised=False)
+                jets_raw, X, mjj, self.Y = utils.class_loader(use_SR=True, nbkg=n_dataset, nsig=n_dataset, unsupervised=False, dataset_type=dataset_type)
 
         n_loaded_events = X.shape[0] # Number of events loaded
+        
         print(f'Raw jets shape: {jets_raw.shape}') # Should be (n_events, 2, 5)
         print(f'Particle array X shape: {X.shape}') # Shape depends on n_particles
 
@@ -359,74 +364,86 @@ class process_subjets():
 
 if __name__ == '__main__':
     t_st = time.time()
-    
-    # classification_task
-    classification_task = 'rnd' # rnd (default) or qvsg
 
-    n_events= 126000
-    N_cluster_list=[30, 35, 40, 50, 75] # Example N_cluster for subjets
+    parser = argparse.ArgumentParser(description='Process subjets and optionally global observables.')
+    parser.add_argument('-c', '--classification_task', type=str, default='rnd', help='Classification task name (default: rnd)')
+    parser.add_argument('-n', '--n_events', type=int, default=10000, help='Number of events to process')
+    parser.add_argument('--supervised', action='store_true', help='Run in supervised mode (default: unsupervised)')
+    parser.add_argument('--only_obs', action='store_true', help='Compute only global observables')
+    parser.add_argument('--subjets_only', action='store_true', help='Compute only subjets (default)')
+    parser.add_argument('--subjets_and_global', action='store_true', help='Compute both subjets and global observables')
+    parser.add_argument('-dq', '--dataset', choices=['qq', 'qqq'], default='qq', help='Signal dataset type to use (default: qq)')
+    parser.add_argument('--subjets', type=int, nargs='+', default=[30,35,40,50,75], help='List of N_cluster values for subjets')
 
-    # --- Options ---
-    unsupervised = True
-    run_only_obs = False          # Calculate only global observables
-    run_only_subjets = True       # Calculate only subjets
-    run_subjets_and_global = False # Calculate both subjets and global observables
+    args = parser.parse_args()
 
-    # Determine flags and directory based on options
-    if unsupervised: 
+    classification_task = args.classification_task
+    n_events = args.n_events
+    dataset_type = args.dataset
+    N_cluster_list = args.subjets
+
+    unsupervised = not args.supervised
+    run_only_obs = args.only_obs
+    run_only_subjets = args.subjets_only
+    run_subjets_and_global = args.subjets_and_global
+
+    if unsupervised:
         run_only_subjets = True
+        run_only_obs = False
+        run_subjets_and_global = False
         only_obs_flag = False
         compute_subjets_and_global_obs_flag = False
-        # Use a directory name indicating unsupervised content
         dir_suffix = f'unsupervised_{n_events}'
     else:
         if run_subjets_and_global:
             only_obs_flag = False
             compute_subjets_and_global_obs_flag = True
-            # Use a directory name indicating combined content
             dir_suffix = f'subjets_and_global_{n_events}'
         elif run_only_obs:
             only_obs_flag = True
             compute_subjets_and_global_obs_flag = False
             dir_suffix = f'jet_obs_{n_events}'
-        elif run_only_subjets:
+        else:
+            run_only_subjets = True
             only_obs_flag = False
             compute_subjets_and_global_obs_flag = False
-            # Use a directory name indicating only subjets
             dir_suffix = f'subjets_only_{n_events}'
-        else:
-            print("No run option selected. Exiting.")
-            sys.exit()
 
-    # Define base directory
+    if dataset_type == 'qqq':
+        dir_suffix += '_qqq'
+
     base_output_dir = f'/pscratch/sd/d/dimathan/LHCO/Data/subjets/{classification_task}_{dir_suffix}'
 
-    print(f"\nRunning with flags: only_obs={only_obs_flag}, compute_subjets_and_global_obs={compute_subjets_and_global_obs_flag}")
+    print(f"\nRunning with flags: only_obs={only_obs_flag}, compute_subjets_and_global_obs={compute_subjets_and_global_obs_flag}, dataset_type={dataset_type}")
     print(f"Output directory: {base_output_dir}\n")
-    
+
     if classification_task == 'rnd':
-        # Run for Sideband (Background)
-        print("--- Processing Sideband (SB) ---")
         if not unsupervised:
+            print("--- Processing Sideband (SB) ---")
             process_subjets(base_output_dir,
                             use_SR=False,
                             n_events=n_events,
                             N_cluster_list=N_cluster_list,
                             only_obs=only_obs_flag,
-                            compute_subjets_and_global_obs=compute_subjets_and_global_obs_flag,)
+                            classification_task=classification_task,
+                            compute_subjets_and_global_obs=compute_subjets_and_global_obs_flag,
+                            unsupervised=False,
+                            dataset_type=dataset_type)
 
-        # Run for Signal Region (Signal + Background)
         print("\n--- Processing Signal Region (SR) ---")
         print(f'unsupervised: {unsupervised}')
         process_subjets(base_output_dir,
                         use_SR=True,
-                        n_events=n_events, # Adjust SR event count if needed
+                        n_events=n_events,
                         N_cluster_list=N_cluster_list,
                         only_obs=only_obs_flag,
-                        compute_subjets_and_global_obs=compute_subjets_and_global_obs_flag, 
-                        unsupervised=unsupervised, )
-        
-    print(f'\nTotal time: {time.time()-t_st:.2f} seconds')
+                        classification_task=classification_task,
+                        compute_subjets_and_global_obs=compute_subjets_and_global_obs_flag,
+                        unsupervised=unsupervised,
+                        dataset_type=dataset_type)
 
-    #125k is 5,10,15,20, 25
+    print(f'\nTotal time: {time.time()-t_st:.2f} seconds')
+    print(f'Saved in {base_output_dir}')
+
+    #125k is 5,10,15,20,25
     #126k is 30,35,40,50,75

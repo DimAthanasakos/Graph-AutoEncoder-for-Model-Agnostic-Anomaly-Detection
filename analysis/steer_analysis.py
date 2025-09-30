@@ -28,7 +28,7 @@ class SteerAnalysis(common_base.CommonBase):
     #---------------------------------------------------------------
     # Constructor
     #---------------------------------------------------------------
-    def __init__(self, input_file='', config_file='', output_dir='', regenerate_graphs=False, ddp = False, model=None, ext_plot = False, n_part=-1, input_dim=-1, n_runs=1, graph_structure='', subjets = -1, angles = -1, compile_flag=True, **kwargs):
+    def __init__(self, input_file='', config_file='', output_dir='', dataset_type=None, regenerate_graphs=False, ddp = False, model=None, ext_plot = False, n_part=-1, input_dim=-1, n_runs=1, graph_structure='', subjets = -1, angles = -1, compile_flag=True, **kwargs):
 
         self.config_file = config_file
         self.input_file = input_file
@@ -40,6 +40,8 @@ class SteerAnalysis(common_base.CommonBase):
         self.n_runs = n_runs
 
         self.initialize(config_file)
+        if dataset_type is None: self.dataset_type = self.config['dataset_type']
+        else: self.dataset_type = dataset_type
         if n_part == -1: self.n_part = self.config['n_part']
         else:  self.n_part = n_part
         self.input_dim = input_dim
@@ -48,7 +50,6 @@ class SteerAnalysis(common_base.CommonBase):
         self.n_events = self.config['n_train'] + self.config['n_val'] 
         if subjets == -1: self.subjets = self.config['subjets']
         else: self.subjets = subjets 
-        if self.rank==0: print(f'Using subjets: {self.subjets}')
         self.angles = angles
         self.use_compile = compile_flag
         
@@ -68,7 +69,6 @@ class SteerAnalysis(common_base.CommonBase):
         with open(config_file, 'r') as stream:
             self.config = yaml.safe_load(stream)
 
-
     #---------------------------------------------------------------
     # Main function
     #---------------------------------------------------------------
@@ -78,37 +78,30 @@ class SteerAnalysis(common_base.CommonBase):
         graph_structures = ''
         for n_part in self.n_part:
             if self.rank==0:
-                if model in ['EdgeNet', 'RelGAE',  'EdgeNet_laman', 'EdgeNet_edge_VGAE',]:
+                if model in ['EdgeNet', 'RelGAE',]:
                     if self.graph_structures[0] == '': graph_structures= self.config[model]['graph_types']
                     else: graph_structures = self.graph_structures
                     unsupervised = self.config[model]['unsupervised'] if 'unsupervised' in self.config[model] else False
                     
+                    data_mode = 'subjet' if self.subjets else 'particle'
+                    edge_addition = self.config[model].get('edge_addition')
+
                     for graph_structure in graph_structures: 
-                        data_mode = 'subjet' if self.subjets else 'particle'
-                        if graph_structure in ['unique', 'knn'] and model in ['RelGAE', 'EdgeNet_laman', 'EdgeNet_edge_VGAE']:
-                            edge_addition = self.config[model]['edge_addition']
-                            if not unsupervised:
-                                graph_key = f'graphs_pyg_SB__{graph_structure}_{data_mode}_{edge_addition}_{n_part}'
-                            elif unsupervised:
-                                graph_key = f'graphs_pyg_SR__{graph_structure}_{data_mode}_{edge_addition}_{n_part}_unsupervised'
-                        else:
-                            if not unsupervised:
-                                graph_key = f'graphs_pyg_SB__{graph_structure}_{data_mode}_{n_part}'
-                            elif unsupervised:
-                                graph_key = f'graphs_pyg_SR__{graph_structure}_{data_mode}_{n_part}_unsupervised'
-                                
+                        graph_key = f"graphs_pyg_{'SB' if not unsupervised else 'SR'}__{graph_structure}_{data_mode}" \
+                                    f"{'_' + str(edge_addition) if graph_structure == 'unique' else ''}" \
+                                    f"_{n_part}_{self.dataset_type}{'_unsupervised' if unsupervised else ''}"
+
                         print('--------'*5)
                         print(f'Using unsupervised: {unsupervised}')
                         print(f'graph_key: {graph_key}')
                         print('--------'*5)
 
                         path = os.path.join(self.output_dir, f'{graph_key}.pt')
-                        if model in ['RelGAE', 'EdgeNet_laman', 'EdgeNet_edge_VGAE', ]: 
+                        if model in ['RelGAE',]: 
                             pair_input_dim = self.config[model]['pair_input_dim']
                             if self.angles == -1:
                                 angles = self.config[model]['angles']
                             else: angles = self.angles
-                            edge_addition = self.config[model]['edge_addition']
                             print('\n','====='*20)
                             print(f'pair_input_dim: {pair_input_dim}, angles: {angles}, edge_addition: {edge_addition}')
                             print('====='*20, '\n')
@@ -117,14 +110,13 @@ class SteerAnalysis(common_base.CommonBase):
                             angles = 0
                             edge_addition = 0
 
-                        # this will create both the graphs for pure bkg (SB) and signal+bkg (SR)
+                        # this will create the graphs for pure bkg (SB) and signal+bkg (SR)
                         print(f'self.regenerate_graphs: {self.regenerate_graphs}')
                         print(f'path: {path}')
                         print(f'os.path.exists(path): {os.path.exists(path)}')
+                        
                         if self.rank==0 and (self.regenerate_graphs or not os.path.exists(path)):
-                            utils.construct_graphs(output_dir=self.output_dir, graph_structure=graph_structure, n_events = self.n_events, n_part = n_part, pair_input_dim=pair_input_dim,subjets = self.subjets, angles=angles, num_edges=edge_addition, unsupervised=unsupervised)
-                    #break # only one model for now
-
+                            utils.construct_graphs(output_dir=self.output_dir, graph_structure=graph_structure, n_events = self.n_events, n_part = n_part, pair_input_dim=pair_input_dim,subjets = self.subjets, angles=angles, num_edges=edge_addition, unsupervised=unsupervised, dataset_type=self.dataset_type, graph_key=graph_key)
             
                 print()
                 print('========================================================================')
@@ -134,7 +126,7 @@ class SteerAnalysis(common_base.CommonBase):
                     self.input_dim = self.config[model]['input_dim']
                     
             lst_part = [n_part]
-            analysis = ml_analysis.MLAnalysis(self.config_file, self.output_dir, self.ddp, self.models, self.ext_plot, n_part=lst_part, input_dim=self.input_dim, graph_structures=self.graph_structures, n_runs=self.n_runs, compile_flag=self.use_compile, subjets=self.subjets)
+            analysis = ml_analysis.MLAnalysis(self.config_file, self.output_dir, self.dataset_type, self.ddp, self.models, self.ext_plot, n_part=lst_part, input_dim=self.input_dim, graph_structures=self.graph_structures, n_runs=self.n_runs, compile_flag=self.use_compile, subjets=self.subjets)
             analysis.train_models()
             
     
@@ -164,10 +156,11 @@ if __name__ == "__main__":
                         action='store_true', default=False)
     parser.add_argument('-m', '--model',  help='Model to use for analysis', 
                         action='store', type=str, default=None, )
+    parser.add_argument('-dq', '--dataset', action='store', type=str, default=None, help='Signal dataset type to use, default is read from config file')
     parser.add_argument('--multi', action='store_true', default=False,help='Mutli-GPU training')
     parser.add_argument('--ext_plot', action='store_true',default=False, help='plot auc vs loss per epoch: VERY SLOW')
-    parser.add_argument('--n_part', action='store', type=int, default=-1, help='Number of particles in each event, for -1 it will be read from config file')
-    parser.add_argument('--input_dim', action='store', type=int, default=-1, help='Number of particles in each event, for -1 it will be read from config file')
+    parser.add_argument('--n_part', action='store', type=int, default=-1, help='Number of particles in each event, default is read from config file')
+    parser.add_argument('--input_dim', action='store', type=int, default=-1, help='Number of particles in each event, default is read from config file')
     parser.add_argument('-gr', '--graph_structure', action='store', type=str, default='', help='Type of graph to use for analysis')
     parser.add_argument('--n_runs', type=int, default=1, help='Number of independent runs (each with fresh initialization)')
     parser.add_argument('-s', '--subjets', type=int, default=-1, help=' Subjet level or hadron level. 0 for hadron, 1 for subjet')
@@ -195,7 +188,8 @@ if __name__ == "__main__":
                              graph_structure = args.graph_structure, n_runs = args.n_runs, 
                              subjets = args.subjets,
                              angles = args.angles,
-                             compile_flag = args.compile)
+                             compile_flag = args.compile, 
+                             dataset_type = args.dataset)
     analysis.run_analysis()
     
     if args.multi: # Only call destroy if DDP was initialized

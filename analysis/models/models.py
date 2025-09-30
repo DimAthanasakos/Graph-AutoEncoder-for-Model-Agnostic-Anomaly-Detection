@@ -10,7 +10,6 @@ from torch_geometric.data import Data
 from torch_scatter import scatter_mean, scatter
 from torch.nn import Sequential as Seq, Linear as Lin, ReLU
 from torch_geometric.nn import MetaLayer, EdgeConv, global_mean_pool, DynamicEdgeConv, GATConv
-from models.layers import GraphConvolution
 from torch_geometric.nn import MessagePassing
 
 
@@ -208,7 +207,7 @@ class RelGAE(nn.Module):
                  latent_dim=2,
                  output_dim=1,
                  encoder_layers=[64, 64,],
-                 decoder_layers=[64, ],
+                 decoder_layers=[32, ],
                  aggr='mean',
                  dropout_rate=0.1):
         """

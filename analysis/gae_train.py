@@ -39,7 +39,7 @@ def kl_anneal(epoch, total_epochs, max_kl_weight=1.0):
     return max_kl_weight * min(1, epoch / (total_epochs * 0.3))  # warm-up over 30% of total epochs
 
 class gae(): 
-    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_test'):
+    def __init__(self, model_info, plot_path='/global/homes/d/dimathan/gae_for_anomaly/Plots/plots_gae/plot_test'):
         self.model_info = model_info
         self.ddp = model_info['ddp']
         self.torch_device = model_info['torch_device']
@@ -78,6 +78,8 @@ class gae():
         self.n_part = model_info['n_part']
         
         self.unsupervised = model_info['model_settings']['unsupervised']
+        if self.unsupervised: self.s_over_b = model_info['model_settings']['s_over_b']
+
         self.path = ''
         if self.model_info['model'] not in  ['AE', 'VAE']:
             self.path = model_info['path_SB'] # path to the data (pyg dataset)
@@ -106,7 +108,7 @@ class gae():
         self.learning_rate = self.model_info['model_settings']['learning_rate']
         
         if self.epochs > 20 and self.n_train > 10000: # otherwise its just testing, no need to store the plots on a permanent folder
-            self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
+            self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/Plots/plots_gae/plot_n{self.n_part}{f'_sb{self.s_over_b}' if self.unsupervised else ''}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
             if not os.path.exists(self.plot_path):
                 os.makedirs(self.plot_path)
 
@@ -128,9 +130,10 @@ class gae():
 
         self.optimizer = torch.optim.AdamW(
                 self.model.parameters(),
-                lr=self.learning_rate,  # Initial learning rate (use a smaller value, e.g., 1e-4 or 5e-5)
-                weight_decay=0.01)  # Regularization to reduce overfitting
-                
+                lr=self.learning_rate,  # Initial learning rate  
+                weight_decay=0.01)      # Regularization to reduce overfitting
+
+        self.scheduler = None   
         # optimizer + Scheduler
         if self.model_info['model'] not in ['AE', 'VAE']:   
 
@@ -138,21 +141,32 @@ class gae():
                 num_training_steps = len(self.train_loader) * self.epochs * dist.get_world_size()
             else:
                 num_training_steps = len(self.train_loader) * self.epochs
-            num_warmup_steps = int(0.02 * num_training_steps)  # Warmup for 20% of training steps
-   
+
             start_lr_div = 5
             end_lr_div = 3
 
-            self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                self.optimizer,
-                max_lr=self.learning_rate,  # Peak learning rate during warmup
-                total_steps=num_training_steps,
-                anneal_strategy='linear',  # Linearly decay the learning rate after warmup
-                pct_start=num_warmup_steps / num_training_steps,  # Proportion of warmup steps
-                div_factor=start_lr_div,  # Initial LR is 1/10th of max_lr
-                final_div_factor= end_lr_div ) # Final LR is 1/5th of max_lr
-        else:
-            self.scheduler = None
+            if num_training_steps <= 1:
+                if self.rank == 0: print('Warning: not enough training steps for OneCycleLR scheduler; disabling scheduler.')
+            else:
+                num_warmup_steps = max(1, int(0.02 * num_training_steps))  # Warmup for ~2% of training steps
+                if num_warmup_steps >= num_training_steps:
+                    num_warmup_steps = num_training_steps - 1
+
+                pct_start = num_warmup_steps / num_training_steps if num_training_steps > 0 else 0.0
+                pct_start = min(0.9, max(0.01, pct_start))
+
+                try:
+                    self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                        self.optimizer,
+                        max_lr=self.learning_rate,  # Peak learning rate during warmup
+                        total_steps=num_training_steps,
+                        anneal_strategy='linear',  # Linearly decay the learning rate after warmup
+                        pct_start=pct_start,
+                        div_factor=start_lr_div,  # Initial LR is 1/10th of max_lr
+                        final_div_factor=end_lr_div ) # Final LR is 1/5th of max_lr
+                except ZeroDivisionError:
+                    if self.rank == 0: print('Warning: OneCycleLR encountered a zero-division error; disabling scheduler.')
+        
             
 
     #---------------------------------------------------------------

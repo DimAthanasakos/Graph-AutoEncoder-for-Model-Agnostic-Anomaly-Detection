@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Using many things from V. Mikuni: https://github.com/ViniciusMikuni/LHCO_diffusion
+Using many things from the utils script of V. Mikuni in: https://github.com/ViniciusMikuni/LHCO_diffusion
 """
 
 import os
@@ -193,6 +193,16 @@ def unique_graph(x, extra_info=False, num_edges=3):
     non_zero_particles = torch.norm(x, p=2, dim=1) != 0
     valid_n = non_zero_particles.sum(axis=1)
 
+    # print(f'debugging')
+    # print(f'x: {x.shape}')
+    # print(f'valid_n: {valid_n.shape}')
+    # print(f'num_particles: {num_particles}')
+    # print(f'num_edges: {num_edges}')
+    # print()
+    # print(f'x[0]: {x[0]}')
+    # print(f'valid_n[0]: {valid_n[0]}')
+    # print()
+
     # Compute pairwise distance matrix using negative squared Euclidean distance
     inner = -2 * torch.matmul(x.transpose(2, 1), x)
     xx = torch.sum(x ** 2, dim=1, keepdim=True)
@@ -241,7 +251,6 @@ def unique_graph(x, extra_info=False, num_edges=3):
     mask = (range_tensor >= expanded_valid_n).to(device)
     final_mask = mask | mask.transpose(1, 2)
     bool_mask = bool_mask & ~final_mask
-
 
     # Make edges bidirectional
     bool_mask = bool_mask | bool_mask.transpose(1, 2)
@@ -494,18 +503,43 @@ def SimpleLoader(data_path,file_name,use_SR=False,
                  mjjmin=2300,mjjmax=5000, 
                  unsupervised=False):
 
+    # print(f'==================')
+    # print('Loading from SimpleLoader')
+    # print(f'data_path: {data_path}')
+    # print(f'file_name: {file_name}')
+    # print(f'==================')
 
     with h5.File(os.path.join(data_path,file_name),"r") as h5f:
         particles = h5f['constituents'][:, :, :n_part, :]
-        jets = h5f['jet_data'][:, :, :n_part]
+        jets = h5f['jet_data'][:]
         mask = h5f['mask'][:, :, :n_part]
-        particles = np.concatenate([particles,mask],-1)
+
+    # print(f'particles shape: {particles.shape}')
+    # print(f'jets shape: {jets.shape}')
+    # print(f'mask shape: {mask.shape}')
+
+    current_n_part = particles.shape[2]
+    if current_n_part < n_part:
+        pad_width_particles = [(0, 0), (0, 0), (0, n_part - current_n_part), (0, 0)]
+        particles = np.pad(particles, pad_width_particles, mode='constant')
+
+        #pad_width_jets = [(0, 0), (0, 0), (0, n_part - current_n_part)]
+        #jets = np.pad(jets, pad_width_jets, mode='constant')
+
+        pad_width_mask = [(0, 0), (0, 0), (0, n_part - current_n_part)]
+        if mask.ndim == 4:
+            pad_width_mask.append((0, 0))
+        mask = np.pad(mask, pad_width_mask, mode='constant')
+
+    particles = np.concatenate([particles,mask],-1)
     
-    print('-----------------------------')
+    # print('-----------------------------')
     # If unsupervised, we use the full mjj range
     # else we follow the instructions of the use_SR flag if we want to use the signal region or the SB 
-    print(f'simple loader with use_SR: {use_SR} and unsupervised: {unsupervised}, file_name: {file_name}')
-    print(f'particles shape: {particles.shape}')
+    # print(f'simple loader with use_SR: {use_SR} and unsupervised: {unsupervised}, file_name: {file_name}')
+    # print(f'particles shape: {particles.shape}')
+    # print(f'jets shape: {jets.shape}')
+    # print('-----------------------------\n')
 
     p4_jets = ef.p4s_from_ptyphims(jets)
 
@@ -524,13 +558,15 @@ def SimpleLoader(data_path,file_name,use_SR=False,
         jets = jets[(mask_region) & (mask_mass)]
         jets[:,:,-1][jets[:,:,-1]<0] = 0.
     
-    print(f'after masking with mass')
-    print(f'particles shape: {particles.shape}')
+    # print(f'after masking with mass')
+    # print(f'particles shape: {particles.shape}')
+    # print(f'jets shape: {jets.shape}')
+    # print('-----------------------------')
 
 
     particles = particles[:, :, :, :3] # keep only the first 3 features
-    print(f'particles shape: {particles.shape}')
-    print('-----------------------------')
+    # print(f'particles shape: {particles.shape}')
+    # print('-----------------------------')
     return particles,jets,mjj
 
 
@@ -543,18 +579,22 @@ def class_loader(data_path='/pscratch/sd/d/dimathan/LHCO/Data',
                  nbkg=120000, # its actually around ~100k in the dataset
                  mjjmin=2300,
                  mjjmax=5000, 
-                 unsupervised=False):
+                 unsupervised=False,
+                 dataset_type='qq'):
     
 
     parts_bkg, jets_bkg, mjj_bkg = SimpleLoader(data_path, file_name, use_SR=use_SR, n_part=n_part, unsupervised=unsupervised)
-    #print(f'parts_bkg shape: {parts_bkg.shape}')
+
     parts_bkg = parts_bkg[:nbkg]
     mjj_bkg = mjj_bkg[:nbkg]
     jets_bkg = jets_bkg[:nbkg]
 
+    # print(f'parts_bkg shape: {parts_bkg.shape}')
+    # print(f'jets_bkg shape: {jets_bkg.shape}')
+    signal_file = f"processed_data_signal_rel{'_qqq' if dataset_type == 'qqq' else ''}.h5"
+    
     if nsig>0:
-        parts_sig,jets_sig,mjj_sig = SimpleLoader(data_path, 'processed_data_signal_rel.h5', use_SR=use_SR, n_part=n_part, unsupervised=unsupervised)
-        #print(f'parts_sig shape: {parts_sig.shape}')
+        parts_sig,jets_sig,mjj_sig = SimpleLoader(data_path, signal_file, use_SR=use_SR, n_part=n_part, unsupervised=unsupervised)
         parts_sig = parts_sig[:nsig]
         mjj_sig = mjj_sig[:nsig]
         jets_sig = jets_sig[:nsig]
@@ -569,6 +609,11 @@ def class_loader(data_path='/pscratch/sd/d/dimathan/LHCO/Data',
         jets = jets_bkg
         mjj = mjj_bkg
 
+    print(f'---------------------------------------')
+    print(f'Loaded parts_bkg.shape: {parts_bkg.shape}')
+    print(f'Loaded jets_bkg.shape: {parts_sig.shape}')
+    print(f'Final Loaded particles.shape: {particles.shape}')
+    print(f'---------------------------------------')
 
 
     return jets, particles, mjj, labels
@@ -667,7 +712,7 @@ def load_jet_observables(n_events, use_SR=False):
 #---------------------------------------------------------------
 # Construct graphs from input_data and write them to file
 #---------------------------------------------------------------
-def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=12000, n_part=100, pair_input_dim=4, subjets = False, load_global_obs=False, angles = 0, num_edges = 3, unsupervised=False): 
+def construct_graphs(output_dir, dataset_type='qq', graph_key=None, use_precomputed_graphs=False, sub_or_part='particle', graph_structure='fully_connected', n_events=12000, n_part=100, pair_input_dim=4, subjets = False, load_global_obs=False, angles = 0, num_edges = 3, unsupervised=False): 
     '''
     Construct graphs:
       - Particle graphs are constructed from energyflow dataset
@@ -684,12 +729,7 @@ def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='part
       - Edge features:
           - Subjet graphs: pairwise angles
           - Particle graphs: no edge features
-    TODO: implement more comprehensive options
-
-    The graphs are saved in several formats:
-      - graphs_numpy_subjet.h5: numpy arrays
-      - graphs_pyg_subjet__{graph_key}.pt: PyG data objects
-      - graphs_pyg_particle__{graph_key}.pt: PyG data objects
+          
     '''
 
     t_st = time.time()
@@ -710,7 +750,9 @@ def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='part
             subjets=subjets,
             load_global_obs=load_global_obs, # Pass flag
             angles=angles,
-            num_edges=num_edges
+            num_edges=num_edges,
+            dataset_type=dataset_type,
+            graph_key=graph_key,
         )
 
     # --- Construct Signal Region Graphs ---
@@ -727,6 +769,8 @@ def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='part
         angles=angles,
         num_edges=num_edges,
         unsupervised=unsupervised,
+        dataset_type=dataset_type,
+        graph_key=graph_key,
     )
 
     print(f'\nFinished constructing graphs in {time.time() - t_st:.2f} seconds.')
@@ -737,41 +781,37 @@ def construct_graphs(output_dir, use_precomputed_graphs=False, sub_or_part='part
 #---------------------------------------------------------------
 # Construct graphs from input_data and write them to file
 #---------------------------------------------------------------
-def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000, rank=0, use_SR=False, n_part=10, num_outputs=4, subjets = False, load_global_obs=False, angles = 0, num_edges = 3, unsupervised=False):
-    '''
-    Construct a list of PyG graphs for the particle-based GNNs, loading from the energyflow dataset
+def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000, rank=0, use_SR=False, n_part=10, num_outputs=4, subjets = False, load_global_obs=False, angles = 0, num_edges = 3, unsupervised=False, dataset_type='qq', graph_key=None):
 
-    Graph structure:
-        - Nodes: particle four-vectors
-        - Edges: no edge features
-        - Connectivity: fully connected (TODO: implement other connectivities)
-    '''
-    print(f'Constructing PyG particle graphs from energyflow dataset...')
-
+    print(f'Graph Construction...')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     global_observables = None
-    print(f'subjets = {subjets}, unsupervised = {unsupervised}, use_SR = {use_SR}')
+    print(f'subjets = {subjets}, unsupervised = {unsupervised}, use_SR = {use_SR}, dataset_type = {dataset_type}')
     # Load data
     if not subjets: 
-        background_target = 120000
-        signal_target = 30000
+        background_target = int(1e6) # just load everything since the regen is only meant to be done once. For subsequent runs, we load the graphs from the file.
+        signal_target = int(1e6)
         if not use_SR: # SB
             sb_events = background_target if unsupervised else n_events
             particles, jets, mjj = DataLoader(n_events=sb_events, rank=rank, n_part=n_part, unsupervised=unsupervised)
             if unsupervised and len(particles) > background_target:
                 particles = particles[:background_target]
+                jets = jets[:background_target]
+                mjj = mjj[:background_target]
+                
             labels = [0]*len(particles)       
         else:          # SR
             if unsupervised:
                 nbkg = background_target
                 nsig = signal_target
-                _, particles, _, labels = class_loader(use_SR=True, nbkg = nbkg, nsig = nsig, n_part=n_part, unsupervised=True)
+                _, particles, _, labels = class_loader(use_SR=True, nbkg = nbkg, nsig = nsig, n_part=n_part, unsupervised=True, dataset_type=dataset_type)
                 if len(particles) > (nbkg + nsig):
                     particles = particles[:nbkg + nsig]
                     labels = labels[:nbkg + nsig]
             else:
                 nbkg = nsig = 10000
-                _, particles, _, labels = class_loader(use_SR=True, nbkg = nbkg, nsig = nsig, n_part=n_part, unsupervised=False)
+                _, particles, _, labels = class_loader(use_SR=True, nbkg = nbkg, nsig = nsig, n_part=n_part, unsupervised=False, dataset_type=dataset_type)
+        
         if rank == 0:
             label_arr = np.array(labels)
             if label_arr.ndim == 2:
@@ -784,17 +824,18 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
         if unsupervised: 
             #file = '/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_unsupervised_250000'
             if n_part in [5,10,15,20,25]:
-                file = '/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_unsupervised_125000' # for 5,10,15,20,25 
+                file = f'/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_unsupervised_125000{'_qqq' if dataset_type == 'qqq' else ""}'  
             elif n_part in [30,35,40,50,75]:
-                file = '/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_unsupervised_126000' # for 30,35,40,50,75
+                file = f'/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_unsupervised_126000{'_qqq' if dataset_type == 'qqq' else ""}' 
         else:
-            file = '/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_subjets_100000'
+            file = f'/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_subjets_100000{'_qqq' if dataset_type == 'qqq' else ""}'
             
             ############# REMOVE THIS LINE #############
-            file = '/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_subjets_only_150000'
+            #file = '/pscratch/sd/d/dimathan/LHCO/Data/subjets/rnd_subjets_only_150000'
             #############################################
 
             if load_global_obs: file='/pscratch/sd/d/dimathan/LHCO/Data/subjets/subjets_and_global_20000'
+
         file = file + '/SR.h5' if use_SR else file + '/SB.h5'
         max_load = int(1e6) # just load everything since the regen is only meant to be done once. For subsequent runs, we load the graphs from the file.
 
@@ -818,101 +859,17 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
     if global_observables is not None: print(f'Global observables shape: {global_observables.shape}')
 
     data_mode = 'subjet' if subjets else 'particle'
-    if graph_structure in ['unique', 'knn']:
-        if use_SR: graph_key = f'SR__{graph_structure}_{data_mode}_{num_edges}_{n_part}{"_unsupervised" if unsupervised else ""}'
-        else: graph_key = f'SB__{graph_structure}_{data_mode}_{num_edges}_{n_part}{"_unsupervised" if unsupervised else ""}'
-    else:
-        if use_SR: graph_key = f'SR__{graph_structure}_{data_mode}_{n_part}{"_unsupervised" if unsupervised else ""}'
-        else: graph_key = f'SB__{graph_structure}_{data_mode}_{n_part}{"_unsupervised" if unsupervised else ""}'
 
-    # preprocess the data before constructing the graphs
-    # Each event has 2 jets, and as can been seen from data_processing.ipynb, we have normalized 
-    # the particles on each jet by: pt-pt_jet, eta-eta_jet, phi/phi_jet. 
-    # This has led to the features practically having a range of [-1,1] for eta and phi. 
-    # In order to increase the range of the features, we scale the features by this procedure:
-    particles_old = particles.copy()
-    mask = (np.linalg.norm(particles_old, axis=-1, keepdims=True) > 0).astype(particles_old.dtype)
-    particles_with_mask = np.concatenate([particles, mask], axis=-1)
-    particles_scaled_with_mask, = _preprocessing(particles_with_mask, norm = 'mean', scaled = True)
-    particles = particles_scaled_with_mask[..., :-1]
+    # preprocess the data before constructing the fully connected graphs 
+    particles_old = particles
+    particles, = _preprocessing(particles, norm = 'mean', scaled = True)
 
     total_size = particles.shape[0]
     chunk_size = 1024*8
     chunks = (total_size - 1) // chunk_size + 1
     n_part = particles.shape[2]
     final_graph_list = []
-    inspect_debug = True 
-    debug_done = False
     
-    # Plot eta/phi distributions before constructing graphs
-    if particles_old.shape[-1] >= 3:
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-        results_dir = os.path.join(project_root, 'Plots')
-        os.makedirs(results_dir, exist_ok=True)
-
-        def plot_eta_phi(feature_array, bins_eta, bins_phi, color, label_suffix, xlabel_suffix=''):
-            valid_mask = np.linalg.norm(feature_array, axis=-1) > 0
-            if not np.any(valid_mask):
-                return
-            eta_values = feature_array[..., 1][valid_mask]
-            phi_values = feature_array[..., 2][valid_mask]
-            if eta_values.size == 0 or phi_values.size == 0:
-                return
-
-            if bins_eta is None:
-                eta_min, eta_max = eta_values.min(), eta_values.max()
-                bins_eta_use = np.linspace(eta_min, eta_max, 60)
-            else:
-                bins_eta_use = bins_eta
-
-            if bins_phi is None:
-                phi_min, phi_max = phi_values.min(), phi_values.max()
-                bins_phi_use = np.linspace(phi_min, phi_max, 60)
-            else:
-                bins_phi_use = bins_phi
-
-            fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
-            axes[0].hist(eta_values, bins=bins_eta_use, histtype='step', color=color, linewidth=1.25)
-            axes[0].set_xlabel(fr'$\eta{xlabel_suffix}$')
-            axes[0].set_ylabel('Counts')
-            axes[0].set_title(f'Eta Distribution{xlabel_suffix}')
-            axes[0].set_yscale('log')
-            
-
-            axes[1].hist(phi_values, bins=bins_phi_use, histtype='step', color=color, linewidth=1.25)
-            axes[1].set_xlabel(fr'$\phi{xlabel_suffix}$')
-            axes[1].set_title(f'Phi Distribution{xlabel_suffix}')
-            axes[1].set_yscale('log')
-
-            fig.tight_layout()
-            plot_path = os.path.join(results_dir, f'eta_phi_distribution{label_suffix}_{graph_key}.png')
-            fig.savefig(plot_path, dpi=200)
-            plt.close(fig)
-            print(f'Saved eta/phi distribution plot to {plot_path}')
-
-        # Original (unscaled) features
-        original_feats = particles_old[..., :3]
-        bins_eta_default = np.linspace(-1.5, 1.5, 60)
-        bins_phi_default = np.linspace(-np.pi, np.pi, 60)
-        plot_eta_phi(
-            feature_array=original_feats,
-            bins_eta=bins_eta_default,
-            bins_phi=bins_phi_default,
-            color='dimgray',
-            label_suffix='',
-        )
-
-        # Scaled features used for graph construction
-        scaled_feats = particles[..., :3]
-        plot_eta_phi(
-            feature_array=scaled_feats,
-            bins_eta=None,
-            bins_phi=None,
-            color='royalblue',
-            label_suffix='_scaled',
-            xlabel_suffix=' (scaled)'
-        )
-
     for i in range(chunks):
         start_idx = i * chunk_size
         end_idx = min((i + 1) * chunk_size, total_size)
@@ -970,7 +927,7 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
                     
                 graph_list.append(event_graphs)
 
-        elif graph_structure in ['laman', 'unique', 'knn']:
+        elif graph_structure in ['laman', 'unique']:
             # Convert the particles array to a torch tensor on the target device. particles shape: (6000, 2, 10, 4)
             particles_t = torch.tensor(prtcls, dtype=torch.float, device=device)
             # Use only the first 3 features for each particle.
@@ -983,8 +940,6 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
                 bool_mask = laman_knn(particles_t, angles = angles)
             elif graph_structure == 'unique':
                 bool_mask = unique_graph(particles_t, num_edges=num_edges)
-            elif graph_structure == 'knn':
-                bool_mask = knn_graph(particles_t, k_neighbors=num_edges)
             # We expect bool_mask to have shape (12000, 10, 10) (one 10x10 mask for each jet).
             # Reshape it back so that it is grouped by event:
             bool_mask = bool_mask.reshape(particles_t.size(0), particles_t.size(1), particles_t.size(-1), particles_t.size(-1))
@@ -1033,44 +988,19 @@ def _construct_particle_graphs_pyg(output_dir, graph_structure, n_events=500000,
                         data.global_features = torch.tensor(jet_global_obs, dtype=torch.float).to(device)
 
                     event_graphs.append(data)
-
-                    if inspect_debug and not debug_done and event_idx < 2:
-                        jet_tensor = particles_t[event_idx, jet_idx]
-                        valid_mask = torch.norm(jet_tensor, dim=0) > 0
-                        eta_phi = jet_tensor[1:3, valid_mask].transpose(0, 1).detach().cpu().numpy()
-                        if eta_phi.size > 0:
-                            eta_vals = eta_phi[:, 0]
-                            phi_vals = eta_phi[:, 1]
-                            delta_eta_np = eta_vals[:, None] - eta_vals[None, :]
-                            delta_phi_np = phi_vals[:, None] - phi_vals[None, :]
-                            delta_phi_np = (delta_phi_np + np.pi) % (2 * np.pi) - np.pi
-                            dist_matrix = np.sqrt(delta_eta_np ** 2 + delta_phi_np ** 2)
-                            cpu_adj = bool_mask[event_idx, jet_idx].detach().cpu()
-                            cpu_valid = valid_mask.detach().cpu()
-                            adj_matrix = cpu_adj[cpu_valid][:, cpu_valid].numpy().astype(int)
-                            print('\n' + '='*80)
-                            print(f'KNN Debug | Event {event_idx}, Jet {jet_idx}')
-                            print('η-φ coordinates (valid particles):')
-                            print(np.round(eta_phi, 4))
-                            print('\nPairwise ΔηΔφ distances:')
-                            print(np.round(dist_matrix, 4))
-                            print('\nAdjacency matrix (after symmetrisation):')
-                            print(adj_matrix)
-                            print('='*80 + '\n')
-                            time.sleep(2)
-                        if event_idx == 1 and jet_idx == 1:
-                            debug_done = True
                 graph_list.append(event_graphs)
 
         final_graph_list.extend(graph_list)
     print(f'Constructed {len(final_graph_list)} PyG graphs for {total_size} events.')
     # Save to file using pytorch
-    graph_filename = os.path.join(output_dir, f"graphs_pyg_{graph_key}.pt")
+    graph_filename = os.path.join(output_dir, f"{graph_key}.pt")
     # Ensure the parent directory exists
     os.makedirs(os.path.dirname(graph_filename), exist_ok=True)
 
     torch.save(final_graph_list, graph_filename)
     print(f'Saved PyG graphs to {graph_filename}.')
+    
+
 
 
 

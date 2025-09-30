@@ -36,7 +36,7 @@ import random
 
 
 class anomaly():
-    def __init__(self, model_info, plot=False, plot_path='/global/homes/d/dimathan/gae_for_anomaly/plots_gae/plot_test', scaler = None) -> None:
+    def __init__(self, model_info, plot=False, plot_path='/global/homes/d/dimathan/gae_for_anomaly/Plots/plots_gae', scaler = None) -> None:
         self.model_info = model_info
         self.path = ''
         if self.model_info['model'] not in  ['AE' ,'VAE']:
@@ -66,18 +66,18 @@ class anomaly():
         self.learning_rate = self.model_info['model_settings']['learning_rate']
         self.input_dim = self.model_info['model_settings']['input_dim']
         
-
-        self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_gae/0525/plot_n{self.n_part}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
-        if not os.path.exists(self.plot_path):
-            os.makedirs(self.plot_path)
-
         self.unsupervised = model_info['model_settings']['unsupervised']
+        if self.unsupervised: self.s_over_b = model_info['model_settings']['s_over_b']
         self.lossname = self.model_info['model_settings']['lossname']
         self.batch_size = self.model_info['model_settings']['batch_size']
 
         if self.lossname == 'MSE': self.criterion = torch.nn.MSELoss()
         else: sys.exit(f'Error: loss {self.lossname} not recognized.')
 
+
+        self.plot_path = f'/global/homes/d/dimathan/gae_for_anomaly/Plots/plots_gae/plot_n{self.n_part}{f'_sb{self.s_over_b}' if self.unsupervised else ''}_e{self.epochs}_lr{self.learning_rate}_N{self.n_train//1000}k'
+        if not os.path.exists(self.plot_path):
+            os.makedirs(self.plot_path)
 
         self.criterion_node = torch.nn.MSELoss(reduction='none')
         self.criterion_edge = torch.nn.MSELoss(reduction='none')

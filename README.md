@@ -47,7 +47,21 @@ The implementation is optimized for the LHC Olympics R&D dataset and includes pr
 
 ## Installation
 
-1. **Install dependencies**:
+
+1. **Download the LHC Olympics R&D dataset**:
+   - Download from [Zenodo](https://zenodo.org/records/6466204)
+   - Place in appropriate directory structure. If using the perlmutter cluster, store in your personal pscratch dir.
+
+## Quick Start
+
+1. **Change all the mentions of /pscratch/sd/d/dimathan/ to your own dir**
+
+2. **Request a gpu node, replace alice_g with your own allocation at perlmutter**
+   ```bash
+   salloc --nodes 1 --qos interactive --time 04:00:00 --constraint gpu --gpus 4 --account=alice_g
+   ```
+
+2. **Install dependencies**:
    ```bash
    # For standard ML analysis
    source ./init_perlmutter.sh
@@ -56,26 +70,26 @@ The implementation is optimized for the LHC Olympics R&D dataset and includes pr
    source ./init_perlmutter_heppy.sh
    ```
 
-2. **Download the LHC Olympics R&D dataset**:
-   - Download from [Zenodo](https://zenodo.org/records/6466204)
-   - Place in appropriate directory structure
-
-## Quick Start
-
-1. **Configure your experiment**:
+3.  **Configure your experiment**:
    ```bash
    # Edit config/config.yaml with your parameters
    nano config/config.yaml
    ```
 
-2. **Run the analysis**:
+4. **Run the analysis**:
    ```bash
-   python -u analysis/steer_analysis.py -c config/config.yaml
+   python analysis/steer_analysis.py -c config/config.yaml
    ```
 
-3. **Check results**:
-   - Results are saved in `Results/` directory
-   - Plots (although not all) are generated in `plots_gae/`
+5. **Run asynchronously for longer**:
+   # Edit the script in sbatch_commands/run1.sh 
+   ```bash
+   sbatch sbatch_commands/run1.sh
+   ```
+
+6. **Check results**:
+   - Output to the terminal from sbatch runs are saved in `Results/` directory
+   - (Some) Plots are generated in `Plots`
 
 ## Usage
 
@@ -83,42 +97,52 @@ The implementation is optimized for the LHC Olympics R&D dataset and includes pr
 
 ```bash
 # Run with default configuration
-python -u analysis/steer_analysis.py -c config/config.yaml
+python analysis/steer_analysis.py -c config/config.yaml
 
-# Run with specific model
-python -u analysis/steer_analysis.py -c config/config.yaml --model RelGAE
+# Take a good look at the flags defined at the end of steer_analysis.py.
 
+# Use a specific number of runs and then print the summary statistics via the flag --n_runs 
+python analysis/steer_analysis.py -c config/config.yaml  --n_runs 3 
+
+# By default, we use torch.compile(model) which creates an overhead of ~2 minutes for the first epoch. 
+# For small-scale testing, e.g. 10k events or a small number of epochs, overwrite this by the flag -ncom 
+python analysis/steer_analysis.py -c config/config.yaml -ncom
 ```
 
 ### Configuration
 
-Most parameters are controlled through `config/config.yaml`. Key parameters include:
+Most parameters are controlled through `config/config.yaml`, some via flags passed to ` steer_analysis.py.`
+Key parameters include:
 
 - `n_train`, `n_val`: Number of training/validation samples
-- `n_part`: Number of particles per jet
+- `n_part`: Number of particles/subjets per jet
 - `subjets`: Use subjets (1) or hadrons (0)
+- `dataset`: Load the qq (standard RnD) or the qqq LHCO dataset
 - `models`: List of models to train
 - `unsupervised`: Training mode
 - `s_over_b`: Signal-to-background ratio for unsupervised training
+- `-ncom`: Flag, whether to compile the ml model. By default yes. 
 
 ## Project Structure
 
 ```
-gae_for_anomaly/
-├── analysis/                # Main analysis scripts
-│   ├── steer_analysis.py    # Main entry point
-│   ├── ml_analysis.py       # ML pipeline
-│   ├── gae_train.py         # GAE training
-│   ├── ml_anomaly.py        # Anomaly detection
-│   ├── process_subjets.py   # Subjet preprocessing
-│   ├── utils.py             # Utility functions
-│   └── models/              # Model implementations
-├── config/                  # Configuration files
-│   └── config.yaml          # Main configuration
-├── preprocessing/           # Preprocessing results
-├── Results/                 # Analysis results
-├── plots_gae/               # Generated plots
-└── init_perlmutter*.sh      # Environment setup scripts
+Graph_AutoEncoder_for_Model_Agnostic_Anomaly_Detection/
+├── analysis/                    # Main analysis scripts
+│   ├── steer_analysis.py        # Main entry point
+│   ├── ml_analysis.py           # ML pipeline
+│   ├── gae_train.py             # GAE training
+│   ├── ml_anomaly.py            # Anomaly detection
+│   ├── utils.py                 # Utility functions
+│   ├── data_preprocessing.ipynb # Basic data analysis. Preprocess the raw LHCO event data, cluster into 2 jets, save it in the pscratch dir.
+│   ├── process_subjets.py       # Custom subjet preprocessing using the heppy library
+│   └── models/models.py         # Model implementations
+├── config/                   
+│   └── config.yaml              # Main configuration
+├── sbatch_commands/             # sbatch script to run code asynchronously
+├── Results/                     # Store the terminal output when using sbatch
+├── Plots/                       # Generated plots
+├── init_perlmutter.sh           # Environment setup script for ML training
+└── init_perlmutter_heppy.sh     # Environment setup script for subjet preprocessing 
 ```
 
 ## Configuration
@@ -131,6 +155,7 @@ n_train: 800
 n_val: 100
 n_part: [10]
 subjets: 1
+dataset_type: 'qq'
 models: ['RelGAE']
 
 RelGAE:
@@ -149,7 +174,7 @@ RelGAE:
 - Uses signal-to-background ratio (`s_over_b`) 
 - Traditional anomaly search with an autoencoder based model
 
-### Weakly Supervised Training
+### Weakly Supervised Training: Not recommended, only for testing purposes
 - Uses sideband regions for training
 - Tests on signal region (SR)
 - Although we can in principle use a `s_over_b` ratio for WS search, currently this is not supported.
@@ -170,14 +195,16 @@ The analysis follows this pipeline:
    - Train selected models
    - Save model checkpoints
 
-4. **Anomaly Detection** (`ml_anomaly.py`)
+4. **ML Architecture** (`models/models.py`)
+   - Modify the ML models used
+
+5. **Anomaly Detection** (`ml_anomaly.py`)
    - Generate anomaly scores
    - Evaluate performance metrics
 
-5. **Visualization** (`plot_script/`)
-   - Generate performance plots
-   - Create summary statistics
-
+The first time a particular combination of `subjets`, `n_part`, `graph_types` is passed, `steer_analysis.py` will
+load the raw 2-jet particle-level data (non-graphed) and create the graphs and store them in the pscratch directory. For subsequent runs
+it will load the graphs.
 
 ## Citation
 

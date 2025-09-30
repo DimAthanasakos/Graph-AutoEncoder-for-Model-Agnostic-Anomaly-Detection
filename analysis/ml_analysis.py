@@ -32,11 +32,12 @@ class MLAnalysis(common_base.CommonBase):
     #---------------------------------------------------------------
     # Constructor
     #---------------------------------------------------------------
-    def __init__(self, config_file='', output_dir='', ddp=False, models = None, ext_plot=False, n_part=-1, input_dim=-1, n_runs = 1, graph_structures=[''], compile_flag=True, subjets=False, **kwargs):
-        super(common_base.CommonBase, self).__init__(**kwargs)
+    def __init__(self, config_file='', output_dir='', dataset_type='qq', ddp=False, models = None, ext_plot=False, n_part=-1, input_dim=-1, n_runs = 1, graph_structures=[''], compile_flag=True, subjets=False, **kwargs):
+        super().__init__(**kwargs)
         
         self.config_file = config_file
         self.output_dir = output_dir
+        self.dataset_type = dataset_type
         self.ddp = ddp  
         self.models = models
         self.ext_plot = ext_plot
@@ -125,10 +126,10 @@ class MLAnalysis(common_base.CommonBase):
                             'ddp': self.ddp,
                             'ext_plot': self.ext_plot,
                             'compile': self.compile_flag,
-                            'subjets': self.subjets,}             
+                            'subjets': self.subjets,         
+                            'dataset_type': self.dataset_type,}             
 
 
-                #AUC = mdl.run_anomaly()
                 if model in ['AE', 'VAE']: 
                     model_key = f'{model}'
                     model_info['model_key'] = model_key
@@ -155,21 +156,21 @@ class MLAnalysis(common_base.CommonBase):
                     n_total = model_info['n_total']
                     unsupervised = model_info['model_settings']['unsupervised'] if 'unsupervised' in model_info['model_settings']  else False
 
+                    data_mode = 'subjet' if self.subjets else 'particle' 
+                    edge_addition = model_info['model_settings'].get('edge_addition')
+
                     for graph_structure in graph_structures: 
                         regions = ['SB', 'SR']
-                        data_mode = 'subjet' if self.subjets else 'particle'
                         for region in regions:
-                            if graph_structure in ['unique', 'knn'] and model in ['RelGAE', 'EdgeNet_edge_VGAE',]:
-                                edge_addition = model_info['model_settings']['edge_addition']
-                                graph_key = f'graphs_pyg_{region}__{graph_structure}_{data_mode}_{edge_addition}_{n_part}{"_unsupervised" if unsupervised else ""}'
-                            else:
-                                graph_key = f'graphs_pyg_{region}__{graph_structure}_{data_mode}_{n_part}{"_unsupervised" if unsupervised else ""}'
+                            graph_key = f'graphs_pyg_{region}__{graph_structure}_{data_mode}{f"_{edge_addition}" if graph_structure == 'unique' else ''}_{n_part}{f"_{self.dataset_type}" if self.dataset_type=='qqq' and region=='SR' else ""}{"_unsupervised" if unsupervised else ""}'
+
                             path = os.path.join(self.output_dir, f'{graph_key}.pt')
                             model_info[f'graph_key_{region}'] = graph_key
                             model_info[f'path_{region}'] = path
                             if self.rank==0:
                                 print(f'graph_key_{region}: {graph_key}')
                                 print(f'path_{region}: {path}')
+                                
                         all_train_losses = []
                         all_val_losses = []
                         all_aucs = []
@@ -247,12 +248,12 @@ class MLAnalysis(common_base.CommonBase):
         2. Validation Loss vs n_part.
         3. A combined plot showing both AUC and Validation Loss vs n_part.
         
-        The plots are saved in /global/homes/d/dimathan/gae_for_anomaly/plots_gae
+        The plots are saved in /global/homes/d/dimathan/gae_for_anomaly/Plots/plots_gae
         with filenames 'large_run_auc.pdf', 'large_run_loss.pdf', and 'large_run_combined.pdf'.
         """
 
         # Define the output directory.
-        out_path = f'/global/homes/d/dimathan/gae_for_anomaly/plots_gae/extended_run_ntot{self.n_total}'
+        out_path = f'/global/homes/d/dimathan/gae_for_anomaly/Plots/plots_gae/extended_run_ntot{self.n_total}'
         if not os.path.exists(out_path): os.makedirs(out_path)
         print(f'Saving extended plots in {out_path}')
 
